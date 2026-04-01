@@ -68,15 +68,16 @@ function parseArgs(argv: string[]) {
 async function main() {
   const { vaultPath, provider: providerName, model, baseURL, maxContext, routerModel, routerBaseURL } = parseArgs(process.argv)
 
+  const isTTYBanner = process.stderr.isTTY
+  const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
+
   if (process.env.SCRIBE_DEBUG) {
     const debugPath = resolve(process.env.SCRIBE_DEBUG_FILE || 'debug.jsonl')
     await initDebugLog(debugPath)
-    console.log(`debug: ${debugPath}`)
+    process.stderr.write(dim(`debug: ${debugPath}\n`))
   }
-  console.log(`scribe v0.1.0`)
-  console.log(`vault: ${vaultPath}`)
-  console.log(`model: ${model}`)
-  console.log(`context: ${maxContext} tokens`)
+  process.stderr.write(`scribe v0.1.0 ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
+  process.stderr.write(dim(`vault: ${vaultPath}\n`))
 
   // Pre-warm: run enzyme petri for vault overview
   let enzymeOverview: string | undefined
@@ -90,9 +91,9 @@ async function main() {
         return `- ${e.name}: ${cats}`
       })
       .join('\n')
-    console.log(`enzyme: vault indexed, ${entities.length}/${(petri.entities || []).length} entities`)
+    process.stderr.write(dim(`enzyme: ${entities.length} entities indexed\n`))
   } catch {
-    console.log('enzyme: not available or vault not indexed')
+    process.stderr.write(dim('enzyme: not available\n'))
   }
 
   // Load memory if it exists
@@ -113,16 +114,8 @@ async function main() {
     memoryContent,
   })
 
-  // Log token budget
   const promptTokens = systemPrompt.reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
-  if (providerName === 'anthropic') {
-    const cachedTokens = systemPrompt.filter(b => b.cache).reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
-    console.log(`system prompt: ~${promptTokens} tokens (${cachedTokens} cached)`)
-  } else {
-    console.log(`system prompt: ~${promptTokens} tokens (no cache control)`)
-  }
-  console.log(`available for conversation: ~${maxContext - promptTokens - 1400} tokens`)
-  console.log('')
+  process.stderr.write(dim(`prompt: ~${promptTokens} tokens · ~${maxContext - promptTokens - 1400} available\n`))
 
   let provider: LLMProvider
   const maxTokens = Math.min(2048, Math.floor(maxContext * 0.25))
@@ -142,7 +135,7 @@ async function main() {
       maxTokens,
       apiKey: process.env.SCRIBE_API_KEY,
     })
-    console.log(`endpoint: ${effectiveBaseURL}`)
+    process.stderr.write(dim(`endpoint: ${effectiveBaseURL}\n`))
   }
 
   // Optional router provider for tool-call turns (smaller, faster model)
@@ -155,7 +148,7 @@ async function main() {
       maxTokens: 512, // Router only needs to emit tool call JSON
       apiKey: process.env.SCRIBE_API_KEY,
     })
-    console.log(`router: ${routerModel} @ ${routerURL}`)
+    process.stderr.write(dim(`router: ${routerModel}\n`))
   }
 
   // Tools
@@ -180,63 +173,103 @@ async function main() {
     prefetch: createEnzymePrefetch(vaultPath),
   })
 
-  // Token tracking
+  // ── Terminal UI ──────────────────────────────────────────────────
+  //
+  // ANSI colors (no dependencies). Minimal, color-coded output:
+  //   dim     — system info (prefetch, turn stats)
+  //   cyan    — tool names
+  //   yellow  — tool queries/args
+  //   red     — errors
+  //   default — model response text
+
+  const isTTY = process.stdout.isTTY
+  const c = {
+    dim:     (s: string) => isTTY ? `\x1b[2m${s}\x1b[0m` : s,
+    cyan:    (s: string) => isTTY ? `\x1b[36m${s}\x1b[0m` : s,
+    yellow:  (s: string) => isTTY ? `\x1b[33m${s}\x1b[0m` : s,
+    red:     (s: string) => isTTY ? `\x1b[31m${s}\x1b[0m` : s,
+    green:   (s: string) => isTTY ? `\x1b[32m${s}\x1b[0m` : s,
+    bold:    (s: string) => isTTY ? `\x1b[1m${s}\x1b[0m` : s,
+  }
+
   let sessionTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let turnCount = 0
+  let currentToolCalls: { name: string; id: string; args: string }[] = []
 
   agent.on((event) => {
     switch (event.type) {
       case 'prefetch_start':
-        process.stdout.write(`[${event.source}] `)
+        process.stderr.write(c.dim(`  ◇ ${event.source}...`))
         break
       case 'prefetch_end':
-        process.stdout.write(event.found ? 'context found\n' : 'no matches\n')
+        process.stderr.write(c.dim(event.found ? ' found\n' : ' none\n'))
         break
-      case 'text_delta':
-        process.stdout.write(event.text)
+
+      case 'tool_call_start': {
+        const query = (event.args.query as string) || (event.args.path as string) || ''
+        const preview = query.slice(0, 80)
+        currentToolCalls.push({ name: event.name, id: event.id, args: preview })
         break
-      case 'tool_call_start':
-        process.stdout.write(`\n[${event.name}] `)
-        break
-      case 'tool_call_end':
+      }
+      case 'tool_call_end': {
+        const tokens = Math.ceil(event.result.content.length / 3.5)
+        const call = currentToolCalls.find(t => t.id === event.id)
         if (event.result.isError) {
-          process.stdout.write(`error: ${event.result.content}\n`)
+          process.stderr.write(c.red(`  ✗ ${event.name}: ${event.result.content.slice(0, 80)}\n`))
         } else {
-          const preview = event.result.content.slice(0, 100).replace(/\n/g, ' ')
-          process.stdout.write(`${preview}${event.result.content.length > 100 ? '...' : ''}\n`)
+          process.stderr.write(
+            `  ${c.cyan(event.name)} ${c.yellow(call?.args || '')}` +
+            c.dim(` → ${tokens} tokens\n`),
+          )
         }
         break
+      }
+
+      case 'turn_start':
+        break
+
       case 'turn_end':
         turnCount++
+        currentToolCalls = []
         if (event.usage) {
           sessionTokens.input += event.usage.inputTokens
           sessionTokens.output += event.usage.outputTokens
           sessionTokens.cacheRead += event.usage.cacheReadTokens || 0
           sessionTokens.cacheWrite += event.usage.cacheWriteTokens || 0
           const cached = event.usage.cacheReadTokens || 0
-          const total = event.usage.inputTokens + (event.usage.cacheReadTokens || 0) + (event.usage.cacheWriteTokens || 0)
-          process.stderr.write(
-            `\n[turn ${turnCount}] in: ${event.usage.inputTokens} out: ${event.usage.outputTokens}` +
-            (cached > 0 ? ` cache_read: ${cached}` : '') +
-            (event.usage.cacheWriteTokens ? ` cache_write: ${event.usage.cacheWriteTokens}` : '') +
-            ` | session: ${sessionTokens.input + sessionTokens.cacheRead + sessionTokens.cacheWrite} in, ${sessionTokens.output} out` +
-            (sessionTokens.cacheRead > 0 ? ` (${sessionTokens.cacheRead} from cache)` : '') +
+          process.stderr.write(c.dim(
+            `  ─ turn ${turnCount}: ${event.usage.inputTokens} in → ${event.usage.outputTokens} out` +
+            (cached > 0 ? ` (${cached} cached)` : '') +
             '\n',
-          )
+          ))
         }
         break
+
+      case 'text_delta':
+        process.stdout.write(event.text)
+        break
+
       case 'compact_start':
-        process.stdout.write('\n[compacting context...]\n')
+        process.stderr.write(c.dim('  ◇ compacting context...\n'))
         break
       case 'compact_end':
-        process.stdout.write('[context compacted]\n')
+        process.stderr.write(c.dim('  ◇ compacted\n'))
         break
+
       case 'error':
-        console.error(`\nerror: ${event.error}`)
+        process.stderr.write(c.red(`\n  ✗ ${event.error}\n`))
         break
-      case 'agent_end':
+
+      case 'agent_end': {
+        const totalIn = sessionTokens.input + sessionTokens.cacheRead + sessionTokens.cacheWrite
+        process.stderr.write(c.dim(
+          `  ═ session: ${totalIn} in, ${sessionTokens.output} out` +
+          (sessionTokens.cacheRead > 0 ? ` (${sessionTokens.cacheRead} from cache)` : '') +
+          '\n',
+        ))
         process.stdout.write('\n')
         break
+      }
     }
   })
 
@@ -255,10 +288,11 @@ async function main() {
     process.exit(0)
   }
 
+  process.stderr.write('\n')
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: '> ',
+    prompt: '\x1b[32m❯\x1b[0m ',
   })
 
   rl.prompt()
