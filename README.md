@@ -1,6 +1,24 @@
-# Digest
+<div align="center">
 
-**8ms vault lookup. 2 LLM turns. 5-8K tokens per response.**
+# 🧬 Digest
+
+**The agent harness that doesn't explore — it already knows.**
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-2,700_LOC-3178C6?logo=typescript&logoColor=white)](https://github.com/jshph/digest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
+
+`8ms vault lookup` · `2 LLM turns` · `5-8K tokens per response` · `runs on 3B-9B local models`
+
+</div>
+
+---
+
+```bash
+export OPENAI_API_KEY=sk-or-...
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1
+npx @jshph/digest ~/your-vault --provider openai --model qwen/qwen3.5-9b --router-model mistralai/ministral-3b-2512
+```
 
 General-purpose agents burn 60-90K tokens exploring a knowledge base — grep, read, decide, repeat. Digest replaces that explore loop with [Enzyme](https://github.com/jshph/enzyme-rust)'s pre-computed semantic index: an 8ms vector lookup against catalyst questions your vault has already generated. The model gets relevant context before it starts thinking.
 
@@ -142,18 +160,21 @@ TextSearch is strictly for structural vault entities — tags and wikilinks that
 ## Running it
 
 ```bash
+# OpenRouter (recommended — Qwen 32B main + Ministral 3B router)
+export OPENAI_API_KEY=sk-or-...
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1
+npx @jshph/digest ~/vault --provider openai --model qwen/qwen3.5-9b \
+  --router-model mistralai/ministral-3b-2512
+
 # Anthropic (uses Claude Code auth or ANTHROPIC_API_KEY)
-digest ~/vault
+npx @jshph/digest ~/vault
 
 # LM Studio (local)
-digest ~/vault --provider lmstudio --model qwen/qwen3.5-9b --max-context 32768
-
-# Two-model split (router + synthesizer, both local)
-digest ~/vault --provider lmstudio --model qwen/qwen3.5-9b \
+npx @jshph/digest ~/vault --provider lmstudio --model qwen/qwen3.5-9b \
   --router-model qwen/qwen3.5-3b --max-context 32768
 
 # Debug logging
-DIGEST_DEBUG=1 digest ~/vault
+DEBUG=1 npx @jshph/digest ~/vault
 ```
 
 Auth resolves automatically: `ANTHROPIC_API_KEY` env var, or Claude Code's OAuth token from macOS Keychain if you're logged in.
@@ -178,7 +199,7 @@ The codebase is designed to be read top-to-bottom as a reference for building mi
 Digest is an agent *harness* — the runtime that runs an agent loop. It's not a protocol (A2A, MCP, ACP), not a framework (LangChain, CrewAI), and not a CLI product. The REPL is a test harness. The real surface is the SDK:
 
 ```typescript
-import { Agent, createAnthropicProvider, buildSystemPrompt, createEnzymePrefetch } from 'digest'
+import { Agent, createAnthropicProvider, buildSystemPrompt, createEnzymePrefetch } from '@jshph/digest'
 ```
 
 It's pluggable but Enzyme-first. The `Tool` and `LLMProvider` interfaces are clean enough to swap backends. The prefetch hook accepts any async function that returns context. But the architecture is designed around the assumption that a semantic index (Enzyme) has already done the expensive work of understanding the vault — the agent just reasons about the results.
