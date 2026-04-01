@@ -5,7 +5,7 @@
 **The agent harness that doesn't explore — it already knows.**
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-2,700_LOC-3178C6?logo=typescript&logoColor=white)](https://github.com/jshph/digest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
 
 `8ms vault lookup` · `2 LLM turns` · `5-8K tokens per response` · `runs on 3B-9B local models`
