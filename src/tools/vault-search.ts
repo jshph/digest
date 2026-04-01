@@ -80,7 +80,7 @@ function formatResults(stdout: string, vaultPath: string): string {
   // Each result: relative path + similarity + excerpt (capped at 300 chars)
   const formatted = results.map(r => {
     const path = r.file_path.replace(vaultPath + '/', '')
-    const excerpt = r.content.slice(0, 300).trim()
+    const excerpt = r.content.trim()
     return `**${path}** (${(r.similarity * 100).toFixed(0)}%)\n${excerpt}`
   })
 

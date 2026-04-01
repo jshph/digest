@@ -169,6 +169,17 @@ export interface LLMProvider {
   ) => AsyncIterable<StreamEvent>
 
   estimateTokens: (text: string) => number
+
+  /**
+   * Fire-and-forget: send a minimal request (max_tokens=1) to warm
+   * the backend's KV cache with this prefix. Optional — providers
+   * that don't benefit (e.g. Anthropic with server-side caching)
+   * can omit this.
+   */
+  warmup?: (
+    systemPrompt: SystemPromptBlock[],
+    messages: LLMMessage[],
+  ) => void
 }
 
 // Messages as the LLM sees them (simplified from internal Message type).
@@ -192,6 +203,17 @@ export interface AgentConfig {
   tools: Tool[]
   provider: LLMProvider
   context: ContextConfig
+
+  /** Max tool-call loop iterations before forcing a text response (default: 5). */
+  maxToolTurns?: number
+
+  /**
+   * Optional smaller/faster provider for tool-call turns only.
+   * When set, tool-call turns use this provider (fast routing),
+   * and the final synthesis turn uses the main `provider`.
+   * Both must be OpenAI-compatible with the same tool format.
+   */
+  routerProvider?: LLMProvider
 
   /**
    * Pre-fetch hook — runs before each LLM call. Receives the recent

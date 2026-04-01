@@ -36,7 +36,7 @@ import { compactMessages } from '../context/compact.js'
 import { clearOldToolResults } from '../context/clearing.js'
 import {
   isDebugEnabled, logCompact, logLLMRequest, logLLMResponse,
-  logPrefetch, logSystemPrompt, logToolCall,
+  logPrefetch, logPrefixCheck, logSystemPrompt, logToolCall,
 } from './debug.js'
 
 export type EventHandler = (event: AgentEvent) => void | Promise<void>
@@ -69,6 +69,14 @@ export class Agent {
 
   /** Send a user message and run the agent loop until it completes. */
   async prompt(text: string): Promise<void> {
+    // Clear old tool results BEFORE the new user message, so stubs are
+    // baked into the prefix. This keeps the prefix stable during the
+    // tool-call loop (KV cache hits on every turn within a prompt).
+    this.messages = clearOldToolResults(
+      this.messages,
+      this.config.context.keepRecentToolResults,
+    )
+
     this.messages.push({
       role: 'user',
       content: text,
@@ -85,6 +93,11 @@ export class Agent {
 
     await this.runLoop()
     await this.emit({ type: 'agent_end' })
+
+    // Warm the KV cache for the next prompt. Clear tool results to get
+    // the stubbed prefix, then fire a max_tokens=1 request so the
+    // backend processes and caches the prefix while the user thinks.
+    this.warmKVCache()
   }
 
   // ── Pre-fetch ────────────────────────────────────────────────────
@@ -143,13 +156,30 @@ export class Agent {
   private async runLoop(): Promise<void> {
     this.abortController = new AbortController()
     const { signal } = this.abortController
+    const maxTurns = this.config.maxToolTurns ?? 5
+    let turn = 0
 
-    while (!signal.aborted) {
+    while (!signal.aborted && turn < maxTurns) {
+      turn++
       await this.manageContext()
       await this.emit({ type: 'turn_start' })
 
-      // Ask the LLM
-      const response = await this.callModel(signal)
+      // Use router provider for tool-call turns if available,
+      // main provider for text responses and forced synthesis.
+      const useRouter = turn <= maxTurns && !!this.config.routerProvider
+
+      // While the router works, warm the synthesis model's KV cache
+      // with the current prefix (system prompt + messages so far).
+      // By the time the router returns and we need synthesis, the
+      // prefix is already cached — only the new suffix gets processed.
+      if (useRouter && this.config.provider.warmup) {
+        this.config.provider.warmup(
+          this.config.systemPrompt,
+          this.toLLMMessages(),
+        )
+      }
+
+      const response = await this.callModel(signal, useRouter ? 'router' : 'main')
       if (!response) break
       this.messages.push(response)
 
@@ -162,10 +192,16 @@ export class Agent {
         break
       }
 
-      // Execute each tool call and append the result
-      for (const call of toolCalls) {
-        if (signal.aborted) break
-        const result = await this.executeTool(call, signal)
+      // Execute tool calls in parallel — they were all decided
+      // before any execute, so they're independent of each other.
+      const results = await Promise.all(
+        toolCalls.map(call =>
+          signal.aborted
+            ? Promise.resolve({ call, result: { content: 'Aborted', isError: true } })
+            : this.executeTool(call, signal).then(result => ({ call, result }))
+        ),
+      )
+      for (const { call, result } of results) {
         this.messages.push({
           role: 'tool_result',
           toolCallId: call.id,
@@ -178,6 +214,21 @@ export class Agent {
 
       await this.emit({ type: 'turn_end', usage: response.usage })
       // Loop back — the model needs to see the tool results
+    }
+
+    // Hit the turn cap — nudge the model to respond with what it has
+    if (turn >= maxTurns && !signal.aborted) {
+      this.messages.push({
+        role: 'user',
+        content: 'You have enough context now. Respond to the user with what you have gathered. Do not call any more tools.',
+        timestamp: Date.now(),
+      } satisfies UserMessage)
+      await this.emit({ type: 'turn_start' })
+      const finalResponse = await this.callModel(signal, 'main')
+      if (finalResponse) {
+        this.messages.push(finalResponse)
+        await this.emit({ type: 'turn_end', usage: finalResponse.usage })
+      }
     }
 
     this.abortController = null
@@ -218,11 +269,8 @@ export class Agent {
   //      SystemCompactMessage. (see context/compact.ts)
 
   private async manageContext(): Promise<void> {
-    this.messages = clearOldToolResults(
-      this.messages,
-      this.config.context.keepRecentToolResults,
-    )
-
+    // Note: tool result clearing is done in prompt() — not here —
+    // so the prefix stays stable during the tool-call loop (KV cache).
     if (shouldCompact(this.estimateTokens(), this.config.context)) {
       await this.emit({ type: 'compact_start' })
       const beforeCount = this.messages.length
@@ -249,14 +297,22 @@ export class Agent {
   // they arrive. Returns the completed AssistantMessage, or null on
   // error/abort.
 
-  private async callModel(signal: AbortSignal): Promise<AssistantMessage | null> {
+  private lastSerializedPrefix: string | null = null
+
+  private async callModel(signal: AbortSignal, which: 'main' | 'router' = 'main'): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
     const toolDefs = this.config.tools.map(t => t.definition)
+    const provider = which === 'router' && this.config.routerProvider
+      ? this.config.routerProvider
+      : this.config.provider
+
+    // Check KV cache prefix stability across turns
+    this.checkPrefixStability(llmMessages)
 
     await logSystemPrompt(this.config.systemPrompt)
     await logLLMRequest(llmMessages, toolDefs, this.estimateTokens())
 
-    const stream = this.config.provider.stream(
+    const stream = provider.stream(
       this.config.systemPrompt,
       llmMessages,
       toolDefs,
@@ -300,6 +356,83 @@ export class Agent {
           return [{ role: 'user', content: `[Previous conversation summary]\n\n${msg.summary}\n\n[Continuing from where we left off]` }]
       }
     })
+  }
+
+  /**
+   * Compare the serialized prompt prefix against the previous turn.
+   * If the prefix diverges, KV cache reuse is broken for that turn.
+   * Logs to debug output when enabled.
+   */
+  private checkPrefixStability(llmMessages: LLMMessage[]): void {
+    if (!isDebugEnabled()) return
+
+    // Serialize system prompt + all messages except the last one
+    // (the last message is the new content — everything before it should match)
+    const systemSerialized = this.config.systemPrompt.map(b => b.text).join('\n\n')
+    const msgsSerialized = llmMessages.map(m => {
+      if (m.role === 'user') return `user:${m.content}`
+      if (m.role === 'tool_result') return `tool:${m.toolCallId}:${m.content}`
+      if (m.role === 'assistant') return `assistant:${JSON.stringify(m.content)}`
+      return ''
+    }).join('\n')
+    const fullSerialized = systemSerialized + '\n' + msgsSerialized
+
+    if (this.lastSerializedPrefix !== null) {
+      // Find where current and previous diverge
+      const prev = this.lastSerializedPrefix
+      const curr = fullSerialized
+      const minLen = Math.min(prev.length, curr.length)
+      let divergeAt = -1
+      for (let i = 0; i < minLen; i++) {
+        if (prev[i] !== curr[i]) {
+          divergeAt = i
+          break
+        }
+      }
+
+      if (divergeAt === -1 && prev.length <= curr.length) {
+        // Previous is a prefix of current — cache should hit
+        logPrefixCheck(true, prev.length, curr.length, null)
+      } else {
+        // Divergence found
+        const ctx = curr.slice(Math.max(0, divergeAt - 40), divergeAt + 40)
+        logPrefixCheck(false, prev.length, curr.length, {
+          position: divergeAt,
+          prevSnippet: prev.slice(Math.max(0, divergeAt - 20), divergeAt + 20),
+          currSnippet: curr.slice(Math.max(0, divergeAt - 20), divergeAt + 20),
+        })
+      }
+    }
+
+    this.lastSerializedPrefix = fullSerialized
+  }
+
+  /**
+   * Fire-and-forget: clear old tool results to get the stubbed prefix,
+   * then send a warmup request so the backend caches it while the user
+   * is thinking about their next message.
+   */
+  private warmKVCache(): void {
+    if (!this.config.provider.warmup) return
+
+    const stubbedMessages = clearOldToolResults(
+      this.messages,
+      this.config.context.keepRecentToolResults,
+    )
+    const llmMessages = stubbedMessages.flatMap((msg): LLMMessage[] => {
+      switch (msg.role) {
+        case 'user':
+          return [{ role: 'user', content: msg.content }]
+        case 'assistant':
+          return [{ role: 'assistant', content: msg.content }]
+        case 'tool_result':
+          return [{ role: 'tool_result', toolCallId: msg.toolCallId, content: msg.content, isError: msg.isError }]
+        case 'system_compact':
+          return [{ role: 'user', content: `[Previous conversation summary]\n\n${msg.summary}\n\n[Continuing from where we left off]` }]
+      }
+    })
+
+    this.config.provider.warmup(this.config.systemPrompt, llmMessages)
   }
 
   private async emit(event: AgentEvent): Promise<void> {

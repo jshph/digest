@@ -143,3 +143,22 @@ export async function logCompact(
     summaryChars,
   })
 }
+
+export async function logPrefixCheck(
+  matches: boolean,
+  prevLen: number,
+  currLen: number,
+  divergence: { position: number; prevSnippet: string; currSnippet: string } | null,
+): Promise<void> {
+  await write({
+    type: 'prefix_check',
+    kvCacheHit: matches,
+    prevLen,
+    currLen,
+    ...(divergence && {
+      divergePosition: divergence.position,
+      prevSnippet: divergence.prevSnippet,
+      currSnippet: divergence.currSnippet,
+    }),
+  })
+}

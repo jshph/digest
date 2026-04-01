@@ -2,18 +2,13 @@
  * Vault context pre-fetch via Enzyme.
  *
  * Runs `enzyme catalyze` on the user's recent messages before the LLM
- * sees the prompt. The results are injected as context so the model
- * can reason about vault content immediately — no tool-call round trip.
+ * sees the prompt. Injects catalyst questions and entity names as a
+ * lightweight routing signal — NOT full content.
  *
- * The catalysts in the results serve a dual purpose:
- *   1. Surface relevant content (the obvious one)
- *   2. Signal familiarity — if catalysts match strongly, the user has
- *      been thinking about this topic. If nothing resonates, it's new
- *      territory. The model can calibrate its response accordingly.
- *
- * This replaces VaultSearch as a tool. The agent still has TextSearch
- * and ReadFile for going deeper, but the initial context retrieval
- * is automatic.
+ * The model uses this to decide whether/how to call VaultSearch
+ * (conceptual, informed by catalyst questions) and TextSearch
+ * (exact match, informed by entity names as #tags/[[wikilinks]]).
+ * Both can fire in parallel on turn 1.
  */
 
 import { execFile } from 'child_process'
@@ -59,24 +54,23 @@ export function createEnzymePrefetch(vaultPath: string) {
         similarity: number
       }>
 
-      if (results.length === 0) return null
-
-      // Format concisely — this goes into the context window
-      const excerpts = results.map(r => {
-        const path = r.file_path.replace(vaultPath + '/', '')
-        const excerpt = r.content.slice(0, 300).trim()
-        return `**${path}** (${(r.similarity * 100).toFixed(0)}% match)\n${excerpt}`
-      })
-
       const catalysts = (response.top_contributing_catalysts || [])
-        .slice(0, 3)
-        .map((c: any) => `- ${c.text} (${c.entity})`)
+        .slice(0, 5)
+        .map((c: any) => `- ${c.text} [${c.entity}]`)
 
-      let content = excerpts.join('\n\n---\n\n')
-      if (catalysts.length > 0) {
-        content += `\n\nThemes connecting these results:\n${catalysts.join('\n')}`
+      if (catalysts.length === 0) return null
+
+      // Collect unique entity names for TextSearch targeting
+      const entities = [...new Set(
+        (response.top_contributing_catalysts || [])
+          .slice(0, 5)
+          .map((c: any) => c.entity as string)
+      )]
+
+      let content = `Relevant tensions in the vault:\n${catalysts.join('\n')}`
+      if (entities.length > 0) {
+        content += `\n\nRelated vault entities (use as #tags or [[wikilinks]] with TextSearch): ${entities.join(', ')}`
       }
-
       return { content, source: 'enzyme catalyze' }
     } catch {
       return null // Enzyme not available or query failed — not an error

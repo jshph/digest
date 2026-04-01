@@ -13,8 +13,11 @@ import { readFile } from 'fs/promises'
 
 import { Agent } from './core/agent.js'
 import { createAnthropicProvider } from './core/providers/anthropic.js'
+import { createOpenAIProvider } from './core/providers/openai.js'
+import type { LLMProvider } from './core/types.js'
 import { buildSystemPrompt } from './prompt/system.js'
 import { createTextSearchTool } from './tools/text-search.js'
+import { createVaultSearchTool } from './tools/vault-search.js'
 import { createReadFileTool } from './tools/read-file.js'
 import { createWriteFileTool } from './tools/write-file.js'
 import { createEnzymePrefetch } from './context/prefetch.js'
@@ -22,10 +25,48 @@ import { initDebugLog } from './core/debug.js'
 
 const execFileAsync = promisify(execFile)
 
+function parseArgs(argv: string[]) {
+  const args = argv.slice(2)
+  let vaultPath = process.env.ENZYME_VAULT_ROOT || '.'
+  let provider = process.env.SCRIBE_PROVIDER || 'anthropic'
+  let model = process.env.SCRIBE_MODEL || ''
+  let baseURL = process.env.SCRIBE_BASE_URL || ''
+  let maxContext = parseInt(process.env.SCRIBE_MAX_CONTEXT || '8192', 10)
+  let routerModel = process.env.SCRIBE_ROUTER_MODEL || ''
+  let routerBaseURL = process.env.SCRIBE_ROUTER_BASE_URL || ''
+
+  for (let i = 0; i < args.length; i++) {
+    switch (args[i]) {
+      case '--provider':
+        provider = args[++i]; break
+      case '--model':
+        model = args[++i]; break
+      case '--base-url':
+        baseURL = args[++i]; break
+      case '--max-context':
+        maxContext = parseInt(args[++i], 10); break
+      case '--router-model':
+        routerModel = args[++i]; break
+      case '--router-base-url':
+        routerBaseURL = args[++i]; break
+      default:
+        // First positional arg is vault path
+        if (!args[i].startsWith('--')) vaultPath = args[i]
+    }
+  }
+
+  // Provider defaults
+  if (provider === 'lmstudio' && !baseURL) baseURL = 'http://localhost:1234/v1'
+  if (provider === 'ollama' && !baseURL) baseURL = 'http://localhost:11434/v1'
+  if (!model) {
+    model = provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'local-model'
+  }
+
+  return { vaultPath: resolve(vaultPath), provider, model, baseURL, maxContext, routerModel, routerBaseURL }
+}
+
 async function main() {
-  const vaultPath = resolve(process.argv[2] || process.env.ENZYME_VAULT_ROOT || '.')
-  const model = process.env.SCRIBE_MODEL || 'claude-haiku-4-5-20251001'
-  const maxContext = parseInt(process.env.SCRIBE_MAX_CONTEXT || '8192', 10)
+  const { vaultPath, provider: providerName, model, baseURL, maxContext, routerModel, routerBaseURL } = parseArgs(process.argv)
 
   if (process.env.SCRIBE_DEBUG) {
     const debugPath = resolve(process.env.SCRIBE_DEBUG_FILE || 'debug.jsonl')
@@ -40,16 +81,16 @@ async function main() {
   // Pre-warm: run enzyme petri for vault overview
   let enzymeOverview: string | undefined
   try {
-    const { stdout } = await execFileAsync('enzyme', ['petri', '-p', vaultPath, '-n', '5'], { timeout: 15000 })
+    const { stdout } = await execFileAsync('enzyme', ['petri', '-p', vaultPath, '-n', '20'], { timeout: 15000 })
     const petri = JSON.parse(stdout)
-    enzymeOverview = (petri.entities || [])
-      .slice(0, 5)
+    const entities = (petri.entities || []).slice(0, 20)
+    enzymeOverview = entities
       .map((e: any) => {
-        const cats = (e.catalysts || []).slice(0, 2).map((c: any) => c.text).join('; ')
-        return `${e.name}: ${cats}`
+        const cats = (e.catalysts || []).slice(0, 3).map((c: any) => c.text).join('; ')
+        return `- ${e.name}: ${cats}`
       })
       .join('\n')
-    console.log(`enzyme: vault indexed, ${(petri.entities || []).length} entities`)
+    console.log(`enzyme: vault indexed, ${entities.length}/${(petri.entities || []).length} entities`)
   } catch {
     console.log('enzyme: not available or vault not indexed')
   }
@@ -74,21 +115,52 @@ async function main() {
 
   // Log token budget
   const promptTokens = systemPrompt.reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
-  const cachedTokens = systemPrompt.filter(b => b.cache).reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
-  console.log(`system prompt: ~${promptTokens} tokens (${cachedTokens} cached)`)
+  if (providerName === 'anthropic') {
+    const cachedTokens = systemPrompt.filter(b => b.cache).reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
+    console.log(`system prompt: ~${promptTokens} tokens (${cachedTokens} cached)`)
+  } else {
+    console.log(`system prompt: ~${promptTokens} tokens (no cache control)`)
+  }
   console.log(`available for conversation: ~${maxContext - promptTokens - 1400} tokens`)
   console.log('')
 
-  const provider = await createAnthropicProvider({
-    model,
-    maxTokens: Math.min(2048, Math.floor(maxContext * 0.25)),
-    ...(process.env.SCRIBE_BASE_URL && { baseURL: process.env.SCRIBE_BASE_URL }),
-  })
+  let provider: LLMProvider
+  const maxTokens = Math.min(2048, Math.floor(maxContext * 0.25))
 
-  // Tools: TextSearch for #tag/[[wikilink]] lookups, ReadFile for full
-  // notes, WriteFile for drafting. VaultSearch and VaultOverview are NOT
-  // tools — catalyze runs via prefetch, petri is in the system prompt.
+  if (providerName === 'anthropic') {
+    provider = await createAnthropicProvider({
+      model,
+      maxTokens,
+      ...(baseURL && { baseURL }),
+    })
+  } else {
+    // OpenAI-compatible: lmstudio, ollama, or any custom --base-url
+    const effectiveBaseURL = baseURL || 'http://localhost:1234/v1'
+    provider = createOpenAIProvider({
+      baseURL: effectiveBaseURL,
+      model,
+      maxTokens,
+      apiKey: process.env.SCRIBE_API_KEY,
+    })
+    console.log(`endpoint: ${effectiveBaseURL}`)
+  }
+
+  // Optional router provider for tool-call turns (smaller, faster model)
+  let routerProvider: LLMProvider | undefined
+  if (routerModel) {
+    const routerURL = routerBaseURL || baseURL || 'http://localhost:1234/v1'
+    routerProvider = createOpenAIProvider({
+      baseURL: routerURL,
+      model: routerModel,
+      maxTokens: 512, // Router only needs to emit tool call JSON
+      apiKey: process.env.SCRIBE_API_KEY,
+    })
+    console.log(`router: ${routerModel} @ ${routerURL}`)
+  }
+
+  // Tools
   const tools = [
+    createVaultSearchTool(vaultPath),
     createTextSearchTool(vaultPath),
     createReadFileTool(vaultPath),
     createWriteFileTool(vaultPath),
@@ -98,6 +170,8 @@ async function main() {
     systemPrompt,
     tools,
     provider,
+    ...(routerProvider && { routerProvider }),
+    maxToolTurns: 1,
     context: {
       maxTokens: maxContext,
       compactThreshold: 0.70,

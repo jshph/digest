@@ -35,8 +35,9 @@ export function createReadFileTool(vaultPath: string): Tool {
       try {
         const content = await readFile(absPath, 'utf-8')
 
-        // Truncate very long files to save context
-        const MAX_CHARS = 4000
+        // Truncate to save context — VaultSearch excerpts cover
+        // most needs; ReadFile is for when you need more detail.
+        const MAX_CHARS = 1500
         if (content.length > MAX_CHARS) {
           const truncated = content.slice(0, MAX_CHARS)
           return {
