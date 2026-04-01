@@ -24,6 +24,10 @@ export type { AnthropicProviderConfig } from './core/providers/anthropic.js'
 export { resolveApiKey } from './core/auth.js'
 
 // Tools
+export { tool } from './tools/tool.js'
+export type { ToolParams } from './tools/tool.js'
+export { createReadTool } from './tools/read.js'
+export { createWriteTool } from './tools/write.js'
 export { createTextSearchTool } from './tools/text-search.js'
 export { createReadFileTool } from './tools/read-file.js'
 export { createWriteFileTool } from './tools/write-file.js'
