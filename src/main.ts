@@ -157,7 +157,8 @@ async function main() {
     await initDebugLog(debugPath)
     process.stderr.write(dim(`debug: ${debugPath}\n`))
   }
-  process.stderr.write(`digest v0.1.0 ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf-8'))
+  process.stderr.write(`digest v${pkg.version} ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
   process.stderr.write(dim(`vault: ${vaultPath}\n`))
 
   // ── Enzyme startup ────────────────────────────────────────────
