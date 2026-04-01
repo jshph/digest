@@ -176,7 +176,7 @@ export class Agent {
     }
 
     this.suppressTextDeltas = hasRouter
-    const firstResponse = await this.callModel(signal, hasRouter ? 'router' : 'main')
+    const firstResponse = await this.callModel(signal, hasRouter ? 'router' : 'main-with-tools')
     this.suppressTextDeltas = false
 
     if (!firstResponse || signal.aborted) {
@@ -307,12 +307,18 @@ export class Agent {
 
   private lastSerializedPrefix: string | null = null
 
-  private async callModel(signal: AbortSignal, which: 'main' | 'router' = 'main'): Promise<AssistantMessage | null> {
+  private async callModel(signal: AbortSignal, which: 'main' | 'main-with-tools' | 'router' = 'main'): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
-    const toolDefs = this.config.tools.map(t => t.definition)
+    // Router gets all tools (including PassThrough).
+    // Main model gets tools on turn 1 (when no router) but not on synthesis.
+    const toolDefs = which === 'router'
+      ? this.config.tools.map(t => t.definition)
+      : which === 'main-with-tools'
+        ? this.config.tools.filter(t => t.definition.name !== 'PassThrough').map(t => t.definition)
+        : []
     const provider = which === 'router' && this.config.routerProvider
       ? this.config.routerProvider
-      : this.config.provider
+      : this.config.provider  // 'main' and 'main-with-tools' both use main provider
 
     // Check KV cache prefix stability across turns
     this.checkPrefixStability(llmMessages)
