@@ -1,17 +1,22 @@
 {
-  "name": "digest",
-  "version": "0.1.0",
+  "name": "@jshph/digest",
+  "version": "0.1.1",
   "description": "Token-efficient writing and thinking agent for Obsidian vaults",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "digest": "./dist/main.js"
+    "digest": "dist/main.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "prepublishOnly": "tsc",
+    "release": "npm version patch && npm publish --access public && git push && git push --tags"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0"

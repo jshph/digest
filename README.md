@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🧬 Digest
+# ⚡ Digest
 
 **The agent harness that doesn't explore — it already knows.**
 
