@@ -1,6 +1,6 @@
 /**
- * Scribe SDK — public API.
- * Import from 'scribe' to build your own integration.
+ * Digest SDK — public API.
+ * Import from 'digest' to build your own integration.
  */
 
 // Core

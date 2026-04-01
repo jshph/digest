@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Scribe — token-efficient writing agent for Obsidian vaults.
+ * Digest — token-efficient writing agent for Obsidian vaults.
  * Minimal REPL for testing. The real value is the SDK (core/).
  */
 
@@ -28,12 +28,12 @@ const execFileAsync = promisify(execFile)
 function parseArgs(argv: string[]) {
   const args = argv.slice(2)
   let vaultPath = process.env.ENZYME_VAULT_ROOT || '.'
-  let provider = process.env.SCRIBE_PROVIDER || 'anthropic'
-  let model = process.env.SCRIBE_MODEL || ''
-  let baseURL = process.env.SCRIBE_BASE_URL || ''
-  let maxContext = parseInt(process.env.SCRIBE_MAX_CONTEXT || '8192', 10)
-  let routerModel = process.env.SCRIBE_ROUTER_MODEL || ''
-  let routerBaseURL = process.env.SCRIBE_ROUTER_BASE_URL || ''
+  let provider = process.env.DIGEST_PROVIDER || 'anthropic'
+  let model = process.env.DIGEST_MODEL || ''
+  let baseURL = process.env.DIGEST_BASE_URL || ''
+  let maxContext = parseInt(process.env.DIGEST_MAX_CONTEXT || '8192', 10)
+  let routerModel = process.env.DIGEST_ROUTER_MODEL || ''
+  let routerBaseURL = process.env.DIGEST_ROUTER_BASE_URL || ''
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -71,12 +71,12 @@ async function main() {
   const isTTYBanner = process.stderr.isTTY
   const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
 
-  if (process.env.SCRIBE_DEBUG) {
-    const debugPath = resolve(process.env.SCRIBE_DEBUG_FILE || 'debug.jsonl')
+  if (process.env.DIGEST_DEBUG) {
+    const debugPath = resolve(process.env.DIGEST_DEBUG_FILE || 'debug.jsonl')
     await initDebugLog(debugPath)
     process.stderr.write(dim(`debug: ${debugPath}\n`))
   }
-  process.stderr.write(`scribe v0.1.0 ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
+  process.stderr.write(`digest v0.1.0 ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
   process.stderr.write(dim(`vault: ${vaultPath}\n`))
 
   // Pre-warm: run enzyme petri for vault overview
@@ -99,7 +99,7 @@ async function main() {
   // Load memory if it exists
   let memoryContent: string | undefined
   try {
-    const memPath = resolve(vaultPath, '.scribe', 'memory', 'MEMORY.md')
+    const memPath = resolve(vaultPath, '.digest', 'memory', 'MEMORY.md')
     memoryContent = await readFile(memPath, 'utf-8')
     // Cap at 200 lines (same as Claude Code)
     const lines = memoryContent.split('\n')
@@ -133,7 +133,7 @@ async function main() {
       baseURL: effectiveBaseURL,
       model,
       maxTokens,
-      apiKey: process.env.SCRIBE_API_KEY,
+      apiKey: process.env.DIGEST_API_KEY,
     })
     process.stderr.write(dim(`endpoint: ${effectiveBaseURL}\n`))
   }
@@ -146,7 +146,7 @@ async function main() {
       baseURL: routerURL,
       model: routerModel,
       maxTokens: 512, // Router only needs to emit tool call JSON
-      apiKey: process.env.SCRIBE_API_KEY,
+      apiKey: process.env.DIGEST_API_KEY,
     })
     process.stderr.write(dim(`router: ${routerModel}\n`))
   }

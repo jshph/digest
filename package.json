@@ -1,12 +1,12 @@
 {
-  "name": "scribe",
+  "name": "digest",
   "version": "0.1.0",
   "description": "Token-efficient writing and thinking agent for Obsidian vaults",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "scribe": "./dist/main.js"
+    "digest": "./dist/main.js"
   },
   "scripts": {
     "build": "tsc",

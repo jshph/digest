@@ -1,5 +1,5 @@
 /**
- * Scribe agent types.
+ * Digest agent types.
  *
  * Read this file first. It defines every type in the system.
  * The architecture is: messages flow through an agent loop that

@@ -1,8 +1,8 @@
 /**
  * Debug logger — writes structured JSONL to a file for prompt tuning.
  *
- * Enable with SCRIBE_DEBUG=1. Writes to .scribe/debug.jsonl in the
- * working directory (or SCRIBE_DEBUG_FILE to override path).
+ * Enable with DIGEST_DEBUG=1. Writes to .digest/debug.jsonl in the
+ * working directory (or DIGEST_DEBUG_FILE to override path).
  *
  * Each line is a JSON object with a type and timestamp. Types:
  *   system_prompt   — the full system prompt blocks sent to the LLM
@@ -29,8 +29,8 @@ let logPath: string | null = null
 let enabled = false
 
 export async function initDebugLog(path?: string): Promise<void> {
-  if (!process.env.SCRIBE_DEBUG && !path) return
-  logPath = path || process.env.SCRIBE_DEBUG_FILE || 'debug.jsonl'
+  if (!process.env.DIGEST_DEBUG && !path) return
+  logPath = path || process.env.DIGEST_DEBUG_FILE || 'debug.jsonl'
   enabled = true
   // Test write immediately so we catch permission issues at startup
   await mkdir(dirname(logPath), { recursive: true })
