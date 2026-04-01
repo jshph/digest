@@ -215,10 +215,8 @@ async function main() {
         break
 
       case 'prefetch_start':
-        process.stderr.write(c.dim(`  ◇ ${event.source}...`))
         break
       case 'prefetch_end':
-        process.stderr.write(c.dim(event.found ? ' found\n' : ' none\n'))
         break
 
       case 'tool_call_start': {
