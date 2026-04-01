@@ -9,7 +9,7 @@ import { createInterface } from 'readline'
 import { resolve } from 'path'
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
-import { readFile } from 'fs/promises'
+import { readFile, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
 
 import { Agent } from './core/agent.js'
@@ -26,15 +26,63 @@ import { initDebugLog } from './core/debug.js'
 
 const execFileAsync = promisify(execFile)
 
+const USAGE = `
+Usage: digest <vault-path> [options]
+
+Arguments:
+  vault-path                 Path to your Obsidian vault (required)
+
+Options:
+  --provider <name>          LLM provider: anthropic, lmstudio, ollama, openai (default: anthropic)
+  --model <name>             Model name (default: claude-haiku-4-5-20251001 for anthropic)
+  --base-url <url>           API base URL (default: auto per provider)
+  --max-context <tokens>     Max context window size (default: 8192)
+  --router-model <name>      Smaller model for tool-call routing (optional)
+  --router-base-url <url>    Base URL for router model (optional)
+  --guide <text>             Guide prompt for enzyme init (optional)
+  --help                     Show this help message
+
+Environment variables:
+  ANTHROPIC_API_KEY           Anthropic API key (or use Claude Code: \`claude login\`)
+  OPENAI_API_KEY              API key for OpenAI-compatible providers
+  OPENAI_BASE_URL             Base URL for OpenAI-compatible providers
+  OPENAI_MODEL                Model for OpenAI-compatible providers
+  ENZYME_VAULT_ROOT           Default vault path
+  DEBUG=1                     Enable debug logging
+  DEBUG_FILE                  Debug log path (default: debug.jsonl)
+
+Examples:
+  # OpenRouter (recommended)
+  export OPENAI_API_KEY=sk-or-...
+  export OPENAI_BASE_URL=https://openrouter.ai/api/v1
+  npx @jshph/digest ~/vault --provider openai --model qwen/qwen3.5-9b \\
+    --router-model mistralai/ministral-3b-2512
+
+  # Anthropic
+  npx @jshph/digest ~/vault
+
+  # Local (LM Studio)
+  npx @jshph/digest ~/vault --provider lmstudio --model qwen/qwen3.5-9b \\
+    --router-model qwen/qwen3.5-3b
+`.trim()
+
+const VALID_PROVIDERS = ['anthropic', 'lmstudio', 'ollama', 'openai']
+
 function parseArgs(argv: string[]) {
   const args = argv.slice(2)
-  let vaultPath = process.env.ENZYME_VAULT_ROOT || '.'
-  let provider = process.env.DIGEST_PROVIDER || 'anthropic'
-  let model = process.env.DIGEST_MODEL || ''
-  let baseURL = process.env.DIGEST_BASE_URL || ''
-  let maxContext = parseInt(process.env.DIGEST_MAX_CONTEXT || '8192', 10)
-  let routerModel = process.env.DIGEST_ROUTER_MODEL || ''
-  let routerBaseURL = process.env.DIGEST_ROUTER_BASE_URL || ''
+
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(USAGE)
+    process.exit(0)
+  }
+
+  let vaultPath = process.env.ENZYME_VAULT_ROOT || ''
+  let provider = 'anthropic'
+  let model = process.env.OPENAI_MODEL || ''
+  let baseURL = process.env.OPENAI_BASE_URL || ''
+  let maxContext = 8192
+  let routerModel = ''
+  let routerBaseURL = ''
   let guide = ''
 
   for (let i = 0; i < args.length; i++) {
@@ -54,14 +102,43 @@ function parseArgs(argv: string[]) {
       case '--guide':
         guide = args[++i]; break
       default:
+        if (args[i].startsWith('--')) {
+          console.error(`Unknown option: ${args[i]}\n`)
+          console.error(USAGE)
+          process.exit(1)
+        }
         // First positional arg is vault path
-        if (!args[i].startsWith('--')) vaultPath = args[i]
+        if (!vaultPath) vaultPath = args[i]
     }
+  }
+
+  // Validate required args
+  const errors: string[] = []
+
+  if (!vaultPath) {
+    errors.push('Missing required argument: <vault-path>')
+  } else if (!existsSync(vaultPath)) {
+    errors.push(`Vault path does not exist: ${vaultPath}`)
+  }
+
+  if (!VALID_PROVIDERS.includes(provider)) {
+    errors.push(`Unknown provider "${provider}". Must be one of: ${VALID_PROVIDERS.join(', ')}`)
+  }
+
+  if (isNaN(maxContext) || maxContext < 1024) {
+    errors.push(`Invalid --max-context: must be a number >= 1024`)
+  }
+
+  if (errors.length > 0) {
+    console.error(errors.map(e => `Error: ${e}`).join('\n') + '\n')
+    console.error(USAGE)
+    process.exit(1)
   }
 
   // Provider defaults
   if (provider === 'lmstudio' && !baseURL) baseURL = 'http://localhost:1234/v1'
   if (provider === 'ollama' && !baseURL) baseURL = 'http://localhost:11434/v1'
+  if (provider === 'openai' && !baseURL) baseURL = 'https://api.openai.com/v1'
   if (!model) {
     model = provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'local-model'
   }
@@ -75,8 +152,8 @@ async function main() {
   const isTTYBanner = process.stderr.isTTY
   const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
 
-  if (process.env.DIGEST_DEBUG) {
-    const debugPath = resolve(process.env.DIGEST_DEBUG_FILE || 'debug.jsonl')
+  if (process.env.DEBUG) {
+    const debugPath = resolve(process.env.DEBUG_FILE || 'debug.jsonl')
     await initDebugLog(debugPath)
     process.stderr.write(dim(`debug: ${debugPath}\n`))
   }
@@ -144,17 +221,20 @@ async function main() {
   }
 
   // Build enzyme env: reuse Digest's LLM config for catalyst generation.
+  // Enzyme reads OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL (OpenAI-compat).
+  // Only override if the user is on an OpenAI-compatible provider — Anthropic
+  // keys won't work with enzyme's OpenAI-compat endpoint.
   // Prefer router model (cheaper) for catalysts, fall back to main model.
-  // Enzyme reads OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL.
-  const enzymeModel = routerModel || model
-  const enzymeBaseURL = routerModel
-    ? (routerBaseURL || baseURL || 'http://localhost:1234/v1')
-    : (baseURL || '')
-  const enzymeApiKey = process.env.DIGEST_API_KEY || process.env.ANTHROPIC_API_KEY || ''
   const enzymeEnv: Record<string, string> = { ...process.env as Record<string, string> }
-  if (enzymeApiKey) enzymeEnv.OPENAI_API_KEY = enzymeApiKey
-  if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
-  if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
+  if (providerName !== 'anthropic') {
+    const enzymeModel = routerModel || model
+    const enzymeBaseURL = routerModel
+      ? (routerBaseURL || baseURL)
+      : baseURL
+    if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
+    if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
+    // OPENAI_API_KEY is already in process.env if set — no need to override
+  }
 
   if (enzymeAvailable && !existsSync(enzymeDb)) {
     // Vault not initialized — run enzyme init
@@ -187,8 +267,12 @@ async function main() {
       } else {
         process.stderr.write(dim('enzyme: initialized (no entities yet)\n'))
       }
-    } catch {
-      process.stderr.write(dim('enzyme: init failed\n'))
+    } catch (err: any) {
+      // If init partially created the db but failed (e.g. mid-catalyst),
+      // remove it so next startup retries init instead of using stale state.
+      try { if (existsSync(enzymeDb)) await unlink(enzymeDb) } catch { /* best effort */ }
+      const detail = err?.stderr || err?.message || String(err)
+      process.stderr.write(dim(`enzyme: init failed — ${detail}\n`))
     }
   } else if (enzymeAvailable) {
     // Already initialized — get petri overview
@@ -198,8 +282,9 @@ async function main() {
       const entities = (petri.entities || []).slice(0, 20)
       enzymeOverview = formatPetriEntities(entities)
       process.stderr.write(dim(`enzyme: ${entities.length} entities indexed\n`))
-    } catch {
-      process.stderr.write(dim('enzyme: petri failed\n'))
+    } catch (err: any) {
+      const detail = err?.stderr || err?.message || String(err)
+      process.stderr.write(dim(`enzyme: petri failed — ${detail}\n`))
     }
   }
 
@@ -240,7 +325,7 @@ async function main() {
       baseURL: effectiveBaseURL,
       model,
       maxTokens,
-      apiKey: process.env.DIGEST_API_KEY,
+      apiKey: process.env.OPENAI_API_KEY,
     })
     process.stderr.write(dim(`endpoint: ${effectiveBaseURL}\n`))
   }
@@ -253,7 +338,7 @@ async function main() {
       baseURL: routerURL,
       model: routerModel,
       maxTokens: 512, // Router only needs to emit tool call JSON
-      apiKey: process.env.DIGEST_API_KEY,
+      apiKey: process.env.OPENAI_API_KEY,
     })
     process.stderr.write(dim(`router: ${routerModel}\n`))
   }
@@ -481,6 +566,6 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error(err)
+  console.error(`\nError: ${err instanceof Error ? err.message : String(err)}`)
   process.exit(1)
 })
