@@ -26,6 +26,8 @@ import { initDebugLog } from './core/debug.js'
 
 const execFileAsync = promisify(execFile)
 
+const DEFAULT_MAX_CONTEXT = 32768
+
 const USAGE = `
 Usage: digest <vault-path> [options]
 
@@ -36,7 +38,7 @@ Options:
   --provider <name>          LLM provider: anthropic, lmstudio, ollama, openai (default: anthropic)
   --model <name>             Model name (default: claude-haiku-4-5-20251001 for anthropic)
   --base-url <url>           API base URL (default: auto per provider)
-  --max-context <tokens>     Max context window size (default: 8192)
+  --max-context <tokens>     Max context window size (default: 32768)
   --router-model <name>      Smaller model for tool-call routing (optional)
   --router-base-url <url>    Base URL for router model (optional)
   --guide <text>             Guide prompt for enzyme init (optional)
@@ -80,7 +82,7 @@ function parseArgs(argv: string[]) {
   let provider = 'anthropic'
   let model = process.env.OPENAI_MODEL || ''
   let baseURL = process.env.OPENAI_BASE_URL || ''
-  let maxContext = 8192
+  let maxContext = DEFAULT_MAX_CONTEXT
   let routerModel = ''
   let routerBaseURL = ''
   let guide = ''

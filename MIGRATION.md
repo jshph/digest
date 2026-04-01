@@ -127,7 +127,7 @@ const agent = new Agent({
   provider,
   systemPrompt: [{ text: 'You are helpful.', cache: true }],
   tools: [],
-  context: { maxTokens: 8192, compactThreshold: 0.7, keepRecentToolResults: 2 },
+  context: { maxTokens: 32768, compactThreshold: 0.7, keepRecentToolResults: 2 },
 })
 ```
 

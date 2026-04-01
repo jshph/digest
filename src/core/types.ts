@@ -242,7 +242,7 @@ export interface ContextConfig {
 
   /**
    * Compact when estimated usage exceeds this fraction of maxTokens.
-   * At 0.70, an 8K window triggers compaction around 5,600 tokens.
+   * At 0.70, a 32K window triggers compaction around 22,937 tokens.
    * Lower = more aggressive (keeps more headroom for the response).
    */
   compactThreshold: number
