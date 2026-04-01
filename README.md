@@ -20,7 +20,7 @@ export OPENAI_BASE_URL=https://openrouter.ai/api/v1
 npx @jshph/digest ~/your-vault --provider openai --model qwen/qwen3.5-9b --router-model mistralai/ministral-3b-2512
 ```
 
-General-purpose agents burn 60-90K tokens exploring a knowledge base — grep, read, decide, repeat. Digest replaces that explore loop with [Enzyme](https://github.com/jshph/enzyme-rust)'s pre-computed semantic index: an 8ms vector lookup against catalyst questions your vault has already generated. The model gets relevant context before it starts thinking.
+General-purpose agents burn 60-90K tokens exploring a knowledge base — grep, read, decide, repeat. Digest replaces that explore loop with [Enzyme](https://www.enzyme.garden/)'s pre-computed semantic index: an 8ms vector lookup against catalyst questions your vault has already generated. The model gets relevant context before it starts thinking.
 
 ~2,700 lines of TypeScript. Runs on local 3B-9B models. Works with Obsidian vaults.
 
@@ -30,7 +30,7 @@ A typical agent exploring a personal knowledge base burns **60,000-90,000 tokens
 
 Digest's total budget for a complete response is **5,000-8,000 tokens** in 2 turns. Not because it does less — because the expensive work already happened.
 
-The key insight: [Enzyme](https://github.com/jshph/enzyme-rust) pre-computes a semantic index of your vault at "compile time" — extracting entities, generating catalyst questions, computing similarity vectors. This is the knowledge graph equivalent of compiling source code into a binary. At runtime, an 8ms `enzyme catalyze` vector lookup replaces what would be 60K+ tokens of explore-mode searching.
+The key insight: [Enzyme](https://www.enzyme.garden/) pre-computes a semantic index of your vault at "compile time" — extracting entities, generating catalyst questions, computing similarity vectors. This is the knowledge graph equivalent of compiling source code into a binary. At runtime, an 8ms `enzyme catalyze` vector lookup replaces what would be 60K+ tokens of explore-mode searching.
 
 Three ideas make this work:
 
@@ -194,12 +194,20 @@ The codebase is designed to be read top-to-bottom as a reference for building mi
 9. **[src/prompt/system.ts](src/prompt/system.ts)** — Cache-aware system prompt construction.
 10. **[src/core/debug.ts](src/core/debug.ts)** — JSONL debug logging for prompt tuning.
 
-## What Digest is not
+## How it compares to Claude Code SDK
 
-Digest is an agent *harness* — the runtime that runs an agent loop. It's not a protocol (A2A, MCP, ACP), not a framework (LangChain, CrewAI), and not a CLI product. The REPL is a test harness. The real surface is the SDK:
+Claude Code's SDK spawns a subprocess, pipes JSONL over stdio, and gives you the full Claude Code agent — permissions, hooks, MCP tools, session persistence. It's powerful, but it's also 70K+ LOC, Anthropic-only, and inherits the explore-mode token economics: the agent decides to search, reads results, decides to search again, and burns 60-90K tokens per response.
 
-```typescript
-import { Agent, createAnthropicProvider, buildSystemPrompt, createEnzymePrefetch } from '@jshph/digest'
-```
+Digest is a 2,700 LOC in-process agent loop. You call `agent.prompt()` directly. The `tool()` helper and Read/Write tools mirror the CC SDK's signatures, so porting is straightforward. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking, so a complete response costs 5-8K tokens instead of 60-90K.
 
-It's pluggable but Enzyme-first. The `Tool` and `LLMProvider` interfaces are clean enough to swap backends. The prefetch hook accepts any async function that returns context. But the architecture is designed around the assumption that a semantic index (Enzyme) has already done the expensive work of understanding the vault — the agent just reasons about the results.
+| | Claude Code SDK | Digest |
+|---|---|---|
+| Tokens per response | 60,000-90,000 (explore loop) | 5,000-8,000 (prefetch + 2 turns) |
+| LLM round trips | 5-10 | 2 |
+| Runtime | Subprocess (spawns CLI, stdio JSONL) | In-process (`agent.prompt()`) |
+| Providers | Anthropic only | Any OpenAI-compatible model |
+| Size | ~70K LOC | ~2,700 LOC |
+
+The tradeoff: you lose sessions, permissions, subagents, and the full built-in tool suite (Bash, Glob, Grep, etc.). You gain provider freedom, explicit context control, and 10x fewer tokens per response.
+
+See **[MIGRATION.md](MIGRATION.md)** for the full mapping: tool definitions, streaming events, provider setup, and what you gain/lose.
