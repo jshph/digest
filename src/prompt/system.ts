@@ -83,10 +83,14 @@ When exploring ideas, surface connections the user might not see. When drafting,
 }
 
 function getToolGuidance(): string {
-  return `The vault overview is in the system context above. Each turn, catalyst questions and entity names appear as "[Vault context for this conversation]". Use both on your first tool call:
+  return `The vault overview is in the system context above. Each turn, catalyst questions and entity names may appear as "[Vault context for this conversation]".
+
+If the user's message is open-ended or conversational (greetings, "what's on my mind", broad questions), respond directly from the vault overview above. Do NOT search — the overview already has what you need. Orient the user around the tensions and themes you see, and ask what they want to explore.
+
+When the user asks about a specific topic or requests vault content, search:
 - VaultSearch: semantic search by concept. Write queries from catalyst questions + user intent. Results include full excerpts — often enough to synthesize from directly.
 - TextSearch: exact match for #tags and [[wikilinks]]. Use the entity names from the vault context (e.g. if you see "craft", search for "#craft"; if you see "enzyme/pmf", search for "[[enzyme/pmf]]").
-Call both VaultSearch and TextSearch in parallel on your first turn to maximize coverage.
+Call both VaultSearch and TextSearch in parallel to maximize coverage.
 
 ReadFile: only use when the user asks to go deeper into a specific note. Never read files proactively — synthesize from VaultSearch excerpts first, then offer to read specific files if the user wants more detail.
 

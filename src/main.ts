@@ -173,6 +173,10 @@ async function main() {
     prefetch: createEnzymePrefetch(vaultPath),
   })
 
+  // Pre-warm with the system prompt while user thinks about their
+  // first message. ~2,700 tokens cached before they type.
+  if (provider.warmup) provider.warmup(systemPrompt, [])
+
   // ── Terminal UI ──────────────────────────────────────────────────
   //
   // ANSI colors (no dependencies). Minimal, color-coded output:

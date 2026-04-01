@@ -159,65 +159,52 @@ export class Agent {
     const maxTurns = this.config.maxToolTurns ?? 5
     let turn = 0
 
-    while (!signal.aborted && turn < maxTurns) {
-      turn++
-      await this.manageContext()
-      await this.emit({ type: 'turn_start' })
+    // Turn 1: always the main model. It decides whether to call tools
+    // (specific query) or respond directly from petri (open-ended).
+    await this.manageContext()
+    await this.emit({ type: 'turn_start' })
 
-      // Use router provider for tool-call turns if available,
-      // main provider for text responses and forced synthesis.
-      const useRouter = turn <= maxTurns && !!this.config.routerProvider
+    const firstResponse = await this.callModel(signal, 'main')
+    if (!firstResponse || signal.aborted) {
+      this.abortController = null
+      return
+    }
+    this.messages.push(firstResponse)
 
-      // While the router works, warm the synthesis model's KV cache
-      // with the current prefix (system prompt + messages so far).
-      // By the time the router returns and we need synthesis, the
-      // prefix is already cached — only the new suffix gets processed.
-      if (useRouter && this.config.provider.warmup) {
-        this.config.provider.warmup(
-          this.config.systemPrompt,
-          this.toLLMMessages(),
-        )
-      }
+    const toolCalls = firstResponse.content.filter(
+      (b): b is ToolCallContent => b.type === 'tool_call',
+    )
 
-      const response = await this.callModel(signal, useRouter ? 'router' : 'main')
-      if (!response) break
-      this.messages.push(response)
-
-      // Text-only response → conversation turn is complete
-      const toolCalls = response.content.filter(
-        (b): b is ToolCallContent => b.type === 'tool_call',
-      )
-      if (toolCalls.length === 0) {
-        await this.emit({ type: 'turn_end', usage: response.usage })
-        break
-      }
-
-      // Execute tool calls in parallel — they were all decided
-      // before any execute, so they're independent of each other.
-      const results = await Promise.all(
-        toolCalls.map(call =>
-          signal.aborted
-            ? Promise.resolve({ call, result: { content: 'Aborted', isError: true } })
-            : this.executeTool(call, signal).then(result => ({ call, result }))
-        ),
-      )
-      for (const { call, result } of results) {
-        this.messages.push({
-          role: 'tool_result',
-          toolCallId: call.id,
-          toolName: call.name,
-          content: result.content,
-          isError: result.isError,
-          timestamp: Date.now(),
-        } satisfies ToolResultMessage)
-      }
-
-      await this.emit({ type: 'turn_end', usage: response.usage })
-      // Loop back — the model needs to see the tool results
+    // No tool calls → model responded directly (open-ended query). Done.
+    if (toolCalls.length === 0) {
+      await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+      this.abortController = null
+      return
     }
 
-    // Hit the turn cap — nudge the model to respond with what it has
-    if (turn >= maxTurns && !signal.aborted) {
+    // Model called tools → execute them in parallel
+    const results = await Promise.all(
+      toolCalls.map(call =>
+        signal.aborted
+          ? Promise.resolve({ call, result: { content: 'Aborted', isError: true } })
+          : this.executeTool(call, signal).then(result => ({ call, result }))
+      ),
+    )
+    for (const { call, result } of results) {
+      this.messages.push({
+        role: 'tool_result',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: result.content,
+        isError: result.isError,
+        timestamp: Date.now(),
+      } satisfies ToolResultMessage)
+    }
+    await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+
+    // Synthesis turn: main model sees tool results and responds.
+    // Nudge it to synthesize rather than call more tools.
+    if (!signal.aborted) {
       this.messages.push({
         role: 'user',
         content: 'You have enough context now. Respond to the user with what you have gathered. Do not call any more tools.',
