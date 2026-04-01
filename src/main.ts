@@ -7,9 +7,10 @@
 
 import { createInterface } from 'readline'
 import { resolve } from 'path'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import { readFile } from 'fs/promises'
+import { existsSync } from 'fs'
 
 import { Agent } from './core/agent.js'
 import { createAnthropicProvider } from './core/providers/anthropic.js'
@@ -34,6 +35,7 @@ function parseArgs(argv: string[]) {
   let maxContext = parseInt(process.env.DIGEST_MAX_CONTEXT || '8192', 10)
   let routerModel = process.env.DIGEST_ROUTER_MODEL || ''
   let routerBaseURL = process.env.DIGEST_ROUTER_BASE_URL || ''
+  let guide = ''
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -49,6 +51,8 @@ function parseArgs(argv: string[]) {
         routerModel = args[++i]; break
       case '--router-base-url':
         routerBaseURL = args[++i]; break
+      case '--guide':
+        guide = args[++i]; break
       default:
         // First positional arg is vault path
         if (!args[i].startsWith('--')) vaultPath = args[i]
@@ -62,11 +66,11 @@ function parseArgs(argv: string[]) {
     model = provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'local-model'
   }
 
-  return { vaultPath: resolve(vaultPath), provider, model, baseURL, maxContext, routerModel, routerBaseURL }
+  return { vaultPath: resolve(vaultPath), provider, model, baseURL, maxContext, routerModel, routerBaseURL, guide }
 }
 
 async function main() {
-  const { vaultPath, provider: providerName, model, baseURL, maxContext, routerModel, routerBaseURL } = parseArgs(process.argv)
+  const { vaultPath, provider: providerName, model, baseURL, maxContext, routerModel, routerBaseURL, guide } = parseArgs(process.argv)
 
   const isTTYBanner = process.stderr.isTTY
   const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
@@ -79,21 +83,124 @@ async function main() {
   process.stderr.write(`digest v0.1.0 ${dim(`· ${model} · ${maxContext} tokens`)}\n`)
   process.stderr.write(dim(`vault: ${vaultPath}\n`))
 
-  // Pre-warm: run enzyme petri for vault overview
+  // ── Enzyme startup ────────────────────────────────────────────
+  //
+  // 1. If `enzyme` binary isn't available, install it
+  // 2. If .enzyme/enzyme.db doesn't exist, run `enzyme init --quiet`
+  // 3. If already initialized, run `enzyme petri` for the overview.
+
   let enzymeOverview: string | undefined
+  const enzymeDb = resolve(vaultPath, '.enzyme', 'enzyme.db')
+
+  // Check if enzyme is installed, prompt to install if not
+  let enzymeAvailable = false
   try {
-    const { stdout } = await execFileAsync('enzyme', ['petri', '-p', vaultPath, '-n', '20'], { timeout: 15000 })
-    const petri = JSON.parse(stdout)
-    const entities = (petri.entities || []).slice(0, 20)
-    enzymeOverview = entities
+    await execFileAsync('enzyme', ['--version'], { timeout: 5_000 })
+    enzymeAvailable = true
+  } catch {
+    // Enzyme not found — explain and ask before installing
+    process.stderr.write('\n')
+    process.stderr.write(dim('  Enzyme compiles your vault into a concept graph so agents\n'))
+    process.stderr.write(dim('  don\'t get lost in your workspace. 8ms on-device semantic\n'))
+    process.stderr.write(dim('  queries, 80% fewer tokens. Local, free for individuals.\n'))
+    process.stderr.write(dim('  https://enzyme.garden\n'))
+    process.stderr.write('\n')
+    const rl = createInterface({ input: process.stdin, output: process.stderr })
+    const answer = await new Promise<string>(resolve => {
+      rl.question(dim('enzyme: not found. Install? (Y/n) '), resolve)
+    })
+    rl.close()
+    if (answer.trim().toLowerCase() !== 'n') {
+      process.stderr.write(dim('enzyme: installing via enzyme.garden...\n'))
+      try {
+        await execFileAsync('bash', ['-c', 'curl -fsSL enzyme.garden/install.sh | bash'], { timeout: 60_000 })
+        await execFileAsync('enzyme', ['--version'], { timeout: 5_000 })
+        enzymeAvailable = true
+        process.stderr.write(dim('enzyme: installed\n'))
+      } catch {
+        process.stderr.write(dim('enzyme: install failed\n'))
+      }
+    } else {
+      process.stderr.write(dim('enzyme: skipped\n'))
+    }
+  }
+
+  function formatPetriEntities(entities: any[]): string {
+    return entities
       .map((e: any) => {
         const cats = (e.catalysts || []).slice(0, 3).map((c: any) => c.text).join('; ')
         return `- ${e.name}: ${cats}`
       })
       .join('\n')
-    process.stderr.write(dim(`enzyme: ${entities.length} entities indexed\n`))
-  } catch {
-    process.stderr.write(dim('enzyme: not available\n'))
+  }
+
+  // Resolve guide: --guide flag takes priority, then guide.md in vault root
+  let resolvedGuide = guide
+  if (!resolvedGuide) {
+    const guidePath = resolve(vaultPath, 'guide.md')
+    try {
+      resolvedGuide = await readFile(guidePath, 'utf-8')
+    } catch { /* no guide.md */ }
+  }
+
+  // Build enzyme env: reuse Digest's LLM config for catalyst generation.
+  // Prefer router model (cheaper) for catalysts, fall back to main model.
+  // Enzyme reads OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL.
+  const enzymeModel = routerModel || model
+  const enzymeBaseURL = routerModel
+    ? (routerBaseURL || baseURL || 'http://localhost:1234/v1')
+    : (baseURL || '')
+  const enzymeApiKey = process.env.DIGEST_API_KEY || process.env.ANTHROPIC_API_KEY || ''
+  const enzymeEnv: Record<string, string> = { ...process.env as Record<string, string> }
+  if (enzymeApiKey) enzymeEnv.OPENAI_API_KEY = enzymeApiKey
+  if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
+  if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
+
+  if (enzymeAvailable && !existsSync(enzymeDb)) {
+    // Vault not initialized — run enzyme init
+    try {
+      const initArgs = ['init', '--quiet', '-p', vaultPath]
+      if (resolvedGuide) initArgs.push('--guide', resolvedGuide)
+      const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+      let frame = 0
+      const start = Date.now()
+      process.stderr.write(dim(`enzyme: initializing vault ${frames[0]}`))
+      const spinner = setInterval(() => {
+        frame = (frame + 1) % frames.length
+        const secs = ((Date.now() - start) / 1000).toFixed(0)
+        process.stderr.write(`\r${dim(`enzyme: initializing vault ${frames[frame]} ${secs}s`)}`)
+      }, 100)
+      let stdout: string
+      try {
+        ({ stdout } = await execFileAsync('enzyme', initArgs, { timeout: 120_000, env: enzymeEnv }))
+      } finally {
+        clearInterval(spinner)
+        process.stderr.write('\r\x1b[K') // clear spinner line
+      }
+      const result = JSON.parse(stdout)
+      // --quiet init output includes petri under the `petri` key
+      const petri = result.petri || result
+      const entities = (petri.entities || []).slice(0, 20)
+      if (entities.length > 0) {
+        enzymeOverview = formatPetriEntities(entities)
+        process.stderr.write(dim(`enzyme: initialized, ${entities.length} entities\n`))
+      } else {
+        process.stderr.write(dim('enzyme: initialized (no entities yet)\n'))
+      }
+    } catch {
+      process.stderr.write(dim('enzyme: init failed\n'))
+    }
+  } else if (enzymeAvailable) {
+    // Already initialized — get petri overview
+    try {
+      const { stdout } = await execFileAsync('enzyme', ['petri', '-p', vaultPath, '-n', '20'], { timeout: 15_000 })
+      const petri = JSON.parse(stdout)
+      const entities = (petri.entities || []).slice(0, 20)
+      enzymeOverview = formatPetriEntities(entities)
+      process.stderr.write(dim(`enzyme: ${entities.length} entities indexed\n`))
+    } catch {
+      process.stderr.write(dim('enzyme: petri failed\n'))
+    }
   }
 
   // Load memory if it exists
@@ -207,6 +314,28 @@ async function main() {
     bold:    (s: string) => isTTY ? `\x1b[1m${s}\x1b[0m` : s,
   }
 
+  // ── Background enzyme refresh ─────────────────────────────────
+  //
+  // After each prompt completes, spawn `enzyme refresh --quiet` as a
+  // detached child. The fast path does cheap local work (index, embed,
+  // similarity) then spawns its own background process for expensive
+  // LLM catalyst regen if stale. We detach + unref so:
+  //   - REPL mode: refresh runs while user thinks about next prompt
+  //   - Piped mode: refresh survives process exit
+  let refreshRunning = false
+  function spawnEnzymeRefresh() {
+    if (refreshRunning) return
+    refreshRunning = true
+    const child = spawn('enzyme', ['refresh', '--quiet', '-p', vaultPath], {
+      detached: true,
+      stdio: 'ignore',
+      env: enzymeEnv,
+    })
+    child.on('exit', () => { refreshRunning = false })
+    child.on('error', () => { refreshRunning = false })
+    child.unref()
+  }
+
   let sessionTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   let turnCount = 0
   let currentToolCalls: { name: string; id: string; args: string }[] = []
@@ -305,6 +434,7 @@ async function main() {
           ` · ${totalTime}\n`,
         ))
         process.stdout.write('\n')
+        spawnEnzymeRefresh()
         break
       }
     }
