@@ -196,8 +196,24 @@ async function main() {
   let turnCount = 0
   let currentToolCalls: { name: string; id: string; args: string }[] = []
 
+  // Timing
+  let promptStartTime = 0       // when user hits enter
+  let turnStartTime = 0         // when a turn begins
+  let firstTokenTime = 0        // first text_delta of synthesis
+  let firstTokenEmitted = false  // track per prompt
+
+  const elapsed = (from: number) => {
+    const ms = Date.now() - from
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+  }
+
   agent.on((event) => {
     switch (event.type) {
+      case 'agent_start':
+        promptStartTime = Date.now()
+        firstTokenEmitted = false
+        break
+
       case 'prefetch_start':
         process.stderr.write(c.dim(`  ◇ ${event.source}...`))
         break
@@ -226,6 +242,7 @@ async function main() {
       }
 
       case 'turn_start':
+        turnStartTime = Date.now()
         break
 
       case 'turn_end':
@@ -237,15 +254,21 @@ async function main() {
           sessionTokens.cacheRead += event.usage.cacheReadTokens || 0
           sessionTokens.cacheWrite += event.usage.cacheWriteTokens || 0
           const cached = event.usage.cacheReadTokens || 0
+          const turnTime = elapsed(turnStartTime)
           process.stderr.write(c.dim(
             `  ─ turn ${turnCount}: ${event.usage.inputTokens} in → ${event.usage.outputTokens} out` +
             (cached > 0 ? ` (${cached} cached)` : '') +
-            '\n',
+            ` ${turnTime}\n`,
           ))
         }
         break
 
       case 'text_delta':
+        if (!firstTokenEmitted) {
+          firstTokenEmitted = true
+          firstTokenTime = Date.now()
+          process.stderr.write(c.green(`  ⚡ first token: ${elapsed(promptStartTime)}\n`))
+        }
         process.stdout.write(event.text)
         break
 
@@ -262,10 +285,11 @@ async function main() {
 
       case 'agent_end': {
         const totalIn = sessionTokens.input + sessionTokens.cacheRead + sessionTokens.cacheWrite
+        const totalTime = elapsed(promptStartTime)
         process.stderr.write(c.dim(
-          `  ═ session: ${totalIn} in, ${sessionTokens.output} out` +
-          (sessionTokens.cacheRead > 0 ? ` (${sessionTokens.cacheRead} from cache)` : '') +
-          '\n',
+          `  ═ ${totalIn} in, ${sessionTokens.output} out` +
+          (sessionTokens.cacheRead > 0 ? ` (${sessionTokens.cacheRead} cached)` : '') +
+          ` · ${totalTime}\n`,
         ))
         process.stdout.write('\n')
         break
