@@ -1,6 +1,6 @@
 {
   "name": "@jshph/digest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Token-efficient writing and thinking agent for Obsidian vaults",
   "type": "module",
   "main": "./dist/index.js",
