@@ -85,7 +85,7 @@ When exploring ideas, surface connections the user might not see. When drafting,
 function getToolGuidance(): string {
   return `The vault overview is in the system context above. Each turn, catalyst questions and entity names may appear as "[Vault context for this conversation]".
 
-If the user's message is open-ended or conversational (greetings, "what's on my mind", broad questions), respond directly from the vault overview above. Do NOT search — the overview already has what you need. Orient the user around the tensions and themes you see, and ask what they want to explore.
+If the user's message is open-ended or conversational (greetings, "what's on my mind", broad questions), call PassThrough. Do NOT search — the vault overview already has what you need.
 
 When the user asks about a specific topic or requests vault content, search:
 - VaultSearch: semantic search by concept. Write queries from catalyst questions + user intent. Results include full excerpts — often enough to synthesize from directly.

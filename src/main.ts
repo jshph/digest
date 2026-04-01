@@ -157,6 +157,16 @@ async function main() {
     createTextSearchTool(vaultPath),
     createReadFileTool(vaultPath),
     createWriteFileTool(vaultPath),
+    // PassThrough: router calls this when no search is needed (open-ended query).
+    // Signals the agent to skip tools and go straight to the main model.
+    {
+      definition: {
+        name: 'PassThrough',
+        description: 'Call this when the user\'s message is open-ended, conversational, or doesn\'t need a vault search. The main model will respond directly from the vault overview.',
+        parameters: {},
+      },
+      execute: async () => ({ content: '', isError: false }),
+    },
   ]
 
   const agent = new Agent({
@@ -173,9 +183,10 @@ async function main() {
     prefetch: createEnzymePrefetch(vaultPath),
   })
 
-  // Pre-warm with the system prompt while user thinks about their
-  // first message. ~2,700 tokens cached before they type.
+  // Pre-warm both models with the system prompt while user thinks
+  // about their first message. ~2,700 tokens cached before they type.
   if (provider.warmup) provider.warmup(systemPrompt, [])
+  if (routerProvider?.warmup) routerProvider.warmup(systemPrompt, [])
 
   // ── Terminal UI ──────────────────────────────────────────────────
   //

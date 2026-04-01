@@ -46,6 +46,7 @@ export class Agent {
   private config: AgentConfig
   private listeners: EventHandler[] = []
   private abortController: AbortController | null = null
+  private suppressTextDeltas = false
 
   constructor(config: AgentConfig) {
     this.config = config
@@ -159,30 +160,51 @@ export class Agent {
     const maxTurns = this.config.maxToolTurns ?? 5
     let turn = 0
 
-    // Turn 1: always the main model. It decides whether to call tools
-    // (specific query) or respond directly from petri (open-ended).
+    const hasRouter = !!this.config.routerProvider
+
+    // Turn 1: router (if available) decides tools or text.
+    // Suppress text_delta during router turn — we don't want its prose.
     await this.manageContext()
     await this.emit({ type: 'turn_start' })
 
-    const firstResponse = await this.callModel(signal, 'main')
+    // Warm the main model's KV cache while the router works
+    if (hasRouter && this.config.provider.warmup) {
+      this.config.provider.warmup(
+        this.config.systemPrompt,
+        this.toLLMMessages(),
+      )
+    }
+
+    this.suppressTextDeltas = hasRouter
+    const firstResponse = await this.callModel(signal, hasRouter ? 'router' : 'main')
+    this.suppressTextDeltas = false
+
     if (!firstResponse || signal.aborted) {
       this.abortController = null
       return
     }
-    this.messages.push(firstResponse)
 
     const toolCalls = firstResponse.content.filter(
       (b): b is ToolCallContent => b.type === 'tool_call',
     )
 
-    // No tool calls → model responded directly (open-ended query). Done.
-    if (toolCalls.length === 0) {
+    // PassThrough or no tool calls → go straight to main model.
+    const isPassThrough = toolCalls.length === 1 && toolCalls[0].name === 'PassThrough'
+    if (toolCalls.length === 0 || isPassThrough) {
+      // Don't push the router's response — main model starts fresh
       await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+      await this.emit({ type: 'turn_start' })
+      const directResponse = await this.callModel(signal, 'main')
+      if (directResponse) {
+        this.messages.push(directResponse)
+        await this.emit({ type: 'turn_end', usage: directResponse.usage })
+      }
       this.abortController = null
       return
     }
 
-    // Model called tools → execute them in parallel
+    // Tools called → execute in parallel
+    this.messages.push(firstResponse)
     const results = await Promise.all(
       toolCalls.map(call =>
         signal.aborted
@@ -203,7 +225,6 @@ export class Agent {
     await this.emit({ type: 'turn_end', usage: firstResponse.usage })
 
     // Synthesis turn: main model sees tool results and responds.
-    // Nudge it to synthesize rather than call more tools.
     if (!signal.aborted) {
       this.messages.push({
         role: 'user',
@@ -310,7 +331,9 @@ export class Agent {
       if (signal.aborted) return null
       switch (event.type) {
         case 'text_delta':
-          await this.emit({ type: 'text_delta', text: event.text })
+          if (!this.suppressTextDeltas) {
+            await this.emit({ type: 'text_delta', text: event.text })
+          }
           break
         case 'thinking_delta':
           await this.emit({ type: 'thinking_delta', text: event.text })
