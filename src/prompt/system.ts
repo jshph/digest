@@ -45,9 +45,9 @@ export function buildSystemPrompt(config: PromptConfig = {}): SystemPromptBlock[
 
   if (config.enzymeOverview) {
     const header = config.vaultName
-      ? `# Vault "${config.vaultName}" overview`
-      : '# Vault overview'
-    cachedParts.push(`${header}\n${config.enzymeOverview}`)
+      ? `# Vault "${config.vaultName}" — topics (NOT note titles)`
+      : '# Vault topics (NOT note titles)'
+    cachedParts.push(`${header}\nThese are topics in the vault, not notes. Do not reference them as notes or quote them. Search to find actual notes.\n${config.enzymeOverview}`)
   }
 
   blocks.push({
@@ -85,16 +85,17 @@ When exploring ideas, surface connections the user might not see. When drafting,
 function getToolGuidance(): string {
   return `The vault overview is in the system context above. Each turn, catalyst questions and entity names may appear as "[Vault context for this conversation]".
 
-If the user's message is open-ended or conversational (greetings, "what's on my mind", broad questions), call PassThrough. Do NOT search — the vault overview already has what you need.
+When in doubt, SEARCH. Only call PassThrough for pure greetings or small talk with no topical content (e.g. "hey", "thanks"). If the user's message references ANY topic, idea, or prior conversation context — even vaguely ("explore that", "tell me more", "what else") — search the vault.
 
-When the user asks about a specific topic or requests vault content, search:
-- VaultSearch: semantic search by concept. Write queries from catalyst questions + user intent. Results include full excerpts — often enough to synthesize from directly.
-- TextSearch: exact match for #tags and [[wikilinks]]. Use the entity names from the vault context (e.g. if you see "craft", search for "#craft"; if you see "enzyme/pmf", search for "[[enzyme/pmf]]").
+Tools:
+- VaultSearch: semantic search by concept. Write queries from the user's intent (e.g. "tension between efficiency and presence"). Results include full excerpts.
+- TextSearch: exact match for #tags and [[wikilinks]]. Use entity names from the vault context (e.g. "craft" → "#craft", "enzyme/pmf" → "[[enzyme/pmf]]").
+- ReadFile: only when the user asks to go deeper into a specific note.
 Call both VaultSearch and TextSearch in parallel to maximize coverage.
 
-ReadFile: only use when the user asks to go deeper into a specific note. Never read files proactively — synthesize from VaultSearch excerpts first, then offer to read specific files if the user wants more detail.
+After synthesizing, offer the user 2-3 specific notes they can explore in detail. Lead with insight, not process.
 
-After synthesizing, offer the user 2-3 specific notes they can explore in detail. Lead with insight, not process.`
+NEVER fabricate note titles, quotes, or content. Only reference notes you found via tool results. If you haven't searched yet, say what topics are available and offer to search.`
 }
 
 function getContextGuidance(): string {

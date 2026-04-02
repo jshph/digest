@@ -30,14 +30,16 @@ export interface OpenAIProviderConfig {
   model: string
   apiKey?: string
   maxTokens?: number
+  /** Force tool calling behavior: "required" makes the model always call a tool. */
+  toolChoice?: 'auto' | 'required' | 'none'
 }
 
 export function createOpenAIProvider(config: OpenAIProviderConfig): LLMProvider {
-  const { baseURL, model, apiKey, maxTokens = 2048 } = config
+  const { baseURL, model, apiKey, maxTokens = 2048, toolChoice } = config
 
   return {
     stream: (systemPrompt, messages, tools, signal) =>
-      streamOpenAI(baseURL, model, apiKey, maxTokens, systemPrompt, messages, tools, signal),
+      streamOpenAI(baseURL, model, apiKey, maxTokens, toolChoice, systemPrompt, messages, tools, signal),
     estimateTokens: roughTokenEstimate,
     warmup: (systemPrompt, messages) =>
       warmupKVCache(baseURL, model, apiKey, systemPrompt, messages),
@@ -49,13 +51,20 @@ async function* streamOpenAI(
   model: string,
   apiKey: string | undefined,
   maxTokens: number,
+  toolChoice: 'auto' | 'required' | 'none' | undefined,
   systemBlocks: SystemPromptBlock[],
   messages: LLMMessage[],
   tools: ToolDefinition[],
   signal?: AbortSignal,
 ): AsyncIterable<StreamEvent> {
   // Flatten system prompt blocks into a single string (no cache control)
-  const systemContent = systemBlocks.map(b => b.text).join('\n\n')
+  let systemContent = systemBlocks.map(b => b.text).join('\n\n')
+
+  // When no tools are provided, suppress models that hallucinate tool-call
+  // XML (e.g. Qwen's <tool_call> format) in their text output.
+  if (tools.length === 0) {
+    systemContent += '\n\nDo not emit tool calls, tool-call XML, or tool names like "PassThrough". Respond in natural language only.'
+  }
 
   const openaiMessages: any[] = [
     { role: 'system', content: systemContent },
@@ -70,10 +79,12 @@ async function* streamOpenAI(
     model,
     max_tokens: maxTokens,
     stream: true,
+    stream_options: { include_usage: true },
     messages: openaiMessages,
   }
   if (openaiTools) {
     body.tools = openaiTools
+    if (toolChoice) body.tool_choice = toolChoice
   }
 
   const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`
@@ -110,6 +121,7 @@ async function* streamOpenAI(
     const toolCalls = new Map<number, { id: string; name: string; args: string }>()
     let inputTokens = 0
     let outputTokens = 0
+    let cachedTokens = 0
     let stopReason: 'end' | 'tool_use' | 'max_tokens' = 'end'
 
     const reader = response.body.getReader()
@@ -137,10 +149,11 @@ async function* streamOpenAI(
           continue
         }
 
-        // Capture usage if present (some providers include it)
+        // Capture usage if present (final chunk in streaming mode)
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens || 0
           outputTokens = chunk.usage.completion_tokens || 0
+          cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0
         }
 
         const choice = chunk.choices?.[0]
@@ -206,7 +219,11 @@ async function* streamOpenAI(
       outputTokens = roughTokenEstimate(textAccumulator)
     }
 
-    const usage: TokenUsage = { inputTokens, outputTokens }
+    const usage: TokenUsage = {
+      inputTokens,
+      outputTokens,
+      ...(cachedTokens > 0 && { cacheReadTokens: cachedTokens }),
+    }
 
     yield {
       type: 'done',

@@ -13,7 +13,6 @@ import { readFile, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
 
 import { Agent } from './core/agent.js'
-import { createAnthropicProvider } from './core/providers/anthropic.js'
 import { createOpenAIProvider } from './core/providers/openai.js'
 import type { LLMProvider } from './core/types.js'
 import { buildSystemPrompt } from './prompt/system.js'
@@ -29,46 +28,40 @@ const execFileAsync = promisify(execFile)
 const DEFAULT_MAX_CONTEXT = 32768
 
 const USAGE = `
-Usage: digest <vault-path> [options]
+Usage: digest [vault-path] [options]
 
 Arguments:
-  vault-path                 Path to your Obsidian vault (required)
+  vault-path                 Path to your Obsidian vault (default: current directory)
 
 Options:
-  --provider <name>          LLM provider: anthropic, lmstudio, ollama, openai (default: anthropic)
-  --model <name>             Model name (default: claude-haiku-4-5-20251001 for anthropic)
-  --base-url <url>           API base URL (default: auto per provider)
+  --model <name>             Model name (overrides OPENAI_MODEL)
+  --base-url <url>           API base URL (overrides OPENAI_BASE_URL)
   --max-context <tokens>     Max context window size (default: 32768)
-  --router-model <name>      Smaller model for tool-call routing (optional)
+  --router-model <name>      Smaller model for tool-call routing (optional, experimental)
   --router-base-url <url>    Base URL for router model (optional)
   --guide <text>             Guide prompt for enzyme init (optional)
   --help                     Show this help message
 
 Environment variables:
-  ANTHROPIC_API_KEY           Anthropic API key (or use Claude Code: \`claude login\`)
   OPENAI_API_KEY              API key for OpenAI-compatible providers
-  OPENAI_BASE_URL             Base URL for OpenAI-compatible providers
-  OPENAI_MODEL                Model for OpenAI-compatible providers
-  ENZYME_VAULT_ROOT           Default vault path
+  OPENAI_BASE_URL             Base URL (default: https://openrouter.ai/api/v1)
+  OPENAI_MODEL                Model name (required if not passed via --model)
   DEBUG=1                     Enable debug logging
   DEBUG_FILE                  Debug log path (default: debug.jsonl)
 
 Examples:
-  # OpenRouter (recommended)
+  # Set up once, then just run digest in your vault
   export OPENAI_API_KEY=sk-or-...
   export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-  npx @jshph/digest ~/vault --provider openai --model qwen/qwen3.5-9b \\
-    --router-model mistralai/ministral-3b-2512
+  export OPENAI_MODEL=qwen/qwen3-32b
+  cd ~/vault && npx @jshph/digest
 
-  # Anthropic
+  # Or specify a vault path
   npx @jshph/digest ~/vault
 
   # Local (LM Studio)
-  npx @jshph/digest ~/vault --provider lmstudio --model qwen/qwen3.5-9b \\
-    --router-model qwen/qwen3.5-3b
+  npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b
 `.trim()
-
-const VALID_PROVIDERS = ['anthropic', 'lmstudio', 'ollama', 'openai']
 
 function parseArgs(argv: string[]) {
   const args = argv.slice(2)
@@ -78,8 +71,7 @@ function parseArgs(argv: string[]) {
     process.exit(0)
   }
 
-  let vaultPath = process.env.ENZYME_VAULT_ROOT || ''
-  let provider = 'anthropic'
+  let vaultPath = ''
   let model = process.env.OPENAI_MODEL || ''
   let baseURL = process.env.OPENAI_BASE_URL || ''
   let maxContext = DEFAULT_MAX_CONTEXT
@@ -89,8 +81,6 @@ function parseArgs(argv: string[]) {
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--provider':
-        provider = args[++i]; break
       case '--model':
         model = args[++i]; break
       case '--base-url':
@@ -114,17 +104,18 @@ function parseArgs(argv: string[]) {
     }
   }
 
+  // Default vault path: ENZYME_VAULT_ROOT > positional arg > cwd
+  if (!vaultPath) vaultPath = process.env.ENZYME_VAULT_ROOT || process.cwd()
+
   // Validate required args
   const errors: string[] = []
 
-  if (!vaultPath) {
-    errors.push('Missing required argument: <vault-path>')
-  } else if (!existsSync(vaultPath)) {
+  if (!existsSync(vaultPath)) {
     errors.push(`Vault path does not exist: ${vaultPath}`)
   }
 
-  if (!VALID_PROVIDERS.includes(provider)) {
-    errors.push(`Unknown provider "${provider}". Must be one of: ${VALID_PROVIDERS.join(', ')}`)
+  if (!model) {
+    errors.push('No model specified. Set OPENAI_MODEL or use --model <name>')
   }
 
   if (isNaN(maxContext) || maxContext < 1024) {
@@ -137,19 +128,14 @@ function parseArgs(argv: string[]) {
     process.exit(1)
   }
 
-  // Provider defaults
-  if (provider === 'lmstudio' && !baseURL) baseURL = 'http://localhost:1234/v1'
-  if (provider === 'ollama' && !baseURL) baseURL = 'http://localhost:11434/v1'
-  if (provider === 'openai' && !baseURL) baseURL = 'https://api.openai.com/v1'
-  if (!model) {
-    model = provider === 'anthropic' ? 'claude-haiku-4-5-20251001' : 'local-model'
-  }
+  // Default base URL
+  if (!baseURL) baseURL = 'https://openrouter.ai/api/v1'
 
-  return { vaultPath: resolve(vaultPath), provider, model, baseURL, maxContext, routerModel, routerBaseURL, guide }
+  return { vaultPath: resolve(vaultPath), model, baseURL, maxContext, routerModel, routerBaseURL, guide }
 }
 
 async function main() {
-  const { vaultPath, provider: providerName, model, baseURL, maxContext, routerModel, routerBaseURL, guide } = parseArgs(process.argv)
+  const { vaultPath, model, baseURL, maxContext, routerModel, routerBaseURL, guide } = parseArgs(process.argv)
 
   const isTTYBanner = process.stderr.isTTY
   const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
@@ -225,19 +211,14 @@ async function main() {
 
   // Build enzyme env: reuse Digest's LLM config for catalyst generation.
   // Enzyme reads OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL (OpenAI-compat).
-  // Only override if the user is on an OpenAI-compatible provider — Anthropic
-  // keys won't work with enzyme's OpenAI-compat endpoint.
   // Prefer router model (cheaper) for catalysts, fall back to main model.
   const enzymeEnv: Record<string, string> = { ...process.env as Record<string, string> }
-  if (providerName !== 'anthropic') {
-    const enzymeModel = routerModel || model
-    const enzymeBaseURL = routerModel
-      ? (routerBaseURL || baseURL)
-      : baseURL
-    if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
-    if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
-    // OPENAI_API_KEY is already in process.env if set — no need to override
-  }
+  const enzymeModel = routerModel || model
+  const enzymeBaseURL = routerModel
+    ? (routerBaseURL || baseURL)
+    : baseURL
+  if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
+  if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
 
   if (enzymeAvailable && !existsSync(enzymeDb)) {
     // Vault not initialized — run enzyme init
@@ -312,26 +293,15 @@ async function main() {
   const promptTokens = systemPrompt.reduce((sum, b) => sum + Math.ceil(b.text.length / 3.5), 0)
   process.stderr.write(dim(`prompt: ~${promptTokens} tokens · ~${maxContext - promptTokens - 1400} available\n`))
 
-  let provider: LLMProvider
   const maxTokens = Math.min(2048, Math.floor(maxContext * 0.25))
 
-  if (providerName === 'anthropic') {
-    provider = await createAnthropicProvider({
-      model,
-      maxTokens,
-      ...(baseURL && { baseURL }),
-    })
-  } else {
-    // OpenAI-compatible: lmstudio, ollama, or any custom --base-url
-    const effectiveBaseURL = baseURL || 'http://localhost:1234/v1'
-    provider = createOpenAIProvider({
-      baseURL: effectiveBaseURL,
-      model,
-      maxTokens,
-      apiKey: process.env.OPENAI_API_KEY,
-    })
-    process.stderr.write(dim(`endpoint: ${effectiveBaseURL}\n`))
-  }
+  const provider: LLMProvider = createOpenAIProvider({
+    baseURL,
+    model,
+    maxTokens,
+    apiKey: process.env.OPENAI_API_KEY,
+  })
+  process.stderr.write(dim(`endpoint: ${baseURL}\n`))
 
   // Optional router provider for tool-call turns (smaller, faster model)
   let routerProvider: LLMProvider | undefined
@@ -342,6 +312,7 @@ async function main() {
       model: routerModel,
       maxTokens: 512, // Router only needs to emit tool call JSON
       apiKey: process.env.OPENAI_API_KEY,
+      toolChoice: 'required', // Force the router to always pick a tool
     })
     process.stderr.write(dim(`router: ${routerModel}\n`))
   }
@@ -514,10 +485,9 @@ async function main() {
         break
 
       case 'agent_end': {
-        const totalIn = sessionTokens.input + sessionTokens.cacheRead + sessionTokens.cacheWrite
         const totalTime = elapsed(promptStartTime)
         process.stderr.write(c.dim(
-          `  ═ ${totalIn} in, ${sessionTokens.output} out` +
+          `  ═ ${sessionTokens.input} in, ${sessionTokens.output} out` +
           (sessionTokens.cacheRead > 0 ? ` (${sessionTokens.cacheRead} cached)` : '') +
           ` · ${totalTime}\n`,
         ))

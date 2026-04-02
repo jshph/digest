@@ -27,6 +27,7 @@ import type {
   PrefetchResult,
   SystemPromptBlock,
   ToolCallContent,
+  ToolDefinition,
   ToolResult,
   ToolResultMessage,
   UserMessage,
@@ -152,6 +153,26 @@ export class Agent {
     }
   }
 
+  // ── Router tools ────────────────────────────────────────────────
+  //
+  // The router sees a simplified tool set: Search(query) + PassThrough.
+  // This reduces a 3B model's job to a binary decision + query extraction.
+  // When the router picks Search, the agent fans out to VaultSearch +
+  // TextSearch in parallel using the router's query.
+
+  private static readonly ROUTER_TOOLS: ToolDefinition[] = [
+    {
+      name: 'Search',
+      description: 'The user\'s message references a topic, idea, or prior context. Search the vault.',
+      parameters: {},
+    },
+    {
+      name: 'PassThrough',
+      description: 'Pure greeting or small talk with no topical content (e.g. "hey", "thanks").',
+      parameters: {},
+    },
+  ]
+
   // ── The loop ─────────────────────────────────────────────────────
 
   private async runLoop(): Promise<void> {
@@ -188,22 +209,90 @@ export class Agent {
       (b): b is ToolCallContent => b.type === 'tool_call',
     )
 
-    // PassThrough or no tool calls → go straight to main model.
+    // PassThrough or no tool calls.
     const isPassThrough = toolCalls.length === 1 && toolCalls[0].name === 'PassThrough'
     if (toolCalls.length === 0 || isPassThrough) {
-      // Don't push the router's response — main model starts fresh
-      await this.emit({ type: 'turn_end', usage: firstResponse.usage })
-      await this.emit({ type: 'turn_start' })
-      const directResponse = await this.callModel(signal, 'main')
-      if (directResponse) {
-        this.messages.push(directResponse)
-        await this.emit({ type: 'turn_end', usage: directResponse.usage })
+      if (hasRouter) {
+        // Router decided no tools needed — discard its response,
+        // call the main model fresh (without tools) for the real answer.
+        await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+        await this.emit({ type: 'turn_start' })
+        const directResponse = await this.callModel(signal, 'main')
+        if (directResponse) {
+          this.messages.push(directResponse)
+          await this.emit({ type: 'turn_end', usage: directResponse.usage })
+        }
+      } else {
+        // No router — the first response IS the main model's answer.
+        this.messages.push(firstResponse)
+        await this.emit({ type: 'turn_end', usage: firstResponse.usage })
       }
       this.abortController = null
       return
     }
 
-    // Tools called → execute in parallel
+    // Router called Search → run VaultSearch + TextSearch, inject results
+    // as context, then let the main model synthesize.
+    if (hasRouter && toolCalls.some(c => c.name === 'Search')) {
+      // Build query from recent user messages (same pattern as prefetch)
+      const query = this.messages
+        .filter((m): m is UserMessage => m.role === 'user')
+        .slice(-3)
+        .map(m => m.content)
+        .join(' ')
+        .slice(0, 300)
+
+      const searchTools = this.config.tools.filter(
+        t => t.definition.name === 'VaultSearch' || t.definition.name === 'TextSearch',
+      )
+
+      // Execute searches in parallel
+      const results = await Promise.all(
+        searchTools.map(async tool => {
+          const call: ToolCallContent = {
+            type: 'tool_call', id: `search_${tool.definition.name}`,
+            name: tool.definition.name, arguments: { query },
+          }
+          await this.emit({ type: 'tool_call_start', id: call.id, name: call.name, args: call.arguments })
+          const result = signal.aborted
+            ? { content: 'Aborted', isError: true }
+            : await tool.execute(call.arguments, signal)
+          await logToolCall(call.name, call.arguments, result.content, result.isError)
+          await this.emit({ type: 'tool_call_end', id: call.id, name: call.name, result })
+          return { name: tool.definition.name, result }
+        }),
+      )
+
+      // Inject results as a user message (like prefetch)
+      const searchContent = results
+        .filter(r => !r.result.isError)
+        .map(r => `[${r.name} results]\n${r.result.content}`)
+        .join('\n\n')
+
+      if (searchContent) {
+        this.messages.push({
+          role: 'user',
+          content: searchContent,
+          timestamp: Date.now(),
+        } satisfies UserMessage)
+      }
+
+      await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+
+      // Synthesis turn: main model responds with search context
+      if (!signal.aborted) {
+        await this.emit({ type: 'turn_start' })
+        const finalResponse = await this.callModel(signal, 'main')
+        if (finalResponse) {
+          this.messages.push(finalResponse)
+          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
+        }
+      }
+      this.abortController = null
+      return
+    }
+
+    // Non-router path: tools called directly → execute in parallel
     this.messages.push(firstResponse)
     const results = await Promise.all(
       toolCalls.map(call =>
@@ -309,10 +398,10 @@ export class Agent {
 
   private async callModel(signal: AbortSignal, which: 'main' | 'main-with-tools' | 'router' = 'main'): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
-    // Router gets all tools (including PassThrough).
-    // Main model gets tools on turn 1 (when no router) but not on synthesis.
+    // Router gets simplified tools (Search + PassThrough).
+    // Main model gets full tools on turn 1 (when no router) but not on synthesis.
     const toolDefs = which === 'router'
-      ? this.config.tools.map(t => t.definition)
+      ? Agent.ROUTER_TOOLS
       : which === 'main-with-tools'
         ? this.config.tools.filter(t => t.definition.name !== 'PassThrough').map(t => t.definition)
         : []
