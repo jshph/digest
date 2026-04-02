@@ -1,16 +1,18 @@
 /**
  * The agent loop.
  *
- * Two-step flow per user prompt:
+ * Unified tool loop — all turns include tool definitions for KV cache
+ * prefix stability. The model decides whether to search or synthesize:
  *
- *   1. Call model WITH tools (text suppressed — models like Qwen emit
- *      <tool_call> XML as text alongside structured calls)
- *      - If no tool calls → re-emit suppressed text → done
- *      - If tool calls → execute them → step 2
+ *   1. Call model with tools (text suppressed — Qwen XML noise)
+ *      - No tool calls → re-emit text → done
+ *      - Tool calls → execute → inject synthesis directive → loop
+ *   2. After tool results, ephemeral directive nudges synthesis
+ *      - Model responds with text → done
+ *      - Max 1 tool round, then forced text response (no tools)
  *
- *   2. Call model WITHOUT tools → synthesis streamed to user
- *
- * That's it. No router, no tool_choice, no retry logic.
+ * The ephemeral directive lists prior search queries and is removed
+ * after the response so it doesn't pollute future prefixes.
  */
 
 import type {
@@ -186,7 +188,7 @@ export class Agent {
         // before the response, but response isn't pushed yet)
         for (let i = this.messages.length - 1; i >= 0; i--) {
           if (this.messages[i].role === 'user' &&
-              (this.messages[i] as UserMessage).content.startsWith('Respond to the user')) {
+              (this.messages[i] as UserMessage).content.startsWith('Respond using the search results')) {
             this.messages.splice(i, 1)
             break
           }
@@ -351,7 +353,11 @@ export class Agent {
   }
 
   private toLLMMessages(): LLMMessage[] {
-    return this.messages.flatMap((msg): LLMMessage[] => {
+    return this.convertToLLM(this.messages)
+  }
+
+  private convertToLLM(messages: Message[]): LLMMessage[] {
+    return messages.flatMap((msg): LLMMessage[] => {
       switch (msg.role) {
         case 'user':
           return [{ role: 'user', content: msg.content }]
@@ -410,19 +416,7 @@ export class Agent {
       this.messages,
       this.config.context.keepRecentToolResults,
     )
-    const llmMessages = stubbedMessages.flatMap((msg): LLMMessage[] => {
-      switch (msg.role) {
-        case 'user':
-          return [{ role: 'user', content: msg.content }]
-        case 'assistant':
-          return [{ role: 'assistant', content: msg.content }]
-        case 'tool_result':
-          return [{ role: 'tool_result', toolCallId: msg.toolCallId, content: msg.content, isError: msg.isError }]
-        case 'system_compact':
-          return [{ role: 'user', content: `[Previous conversation summary]\n\n${msg.summary}\n\n[Continuing from where we left off]` }]
-      }
-    })
-
+    const llmMessages = this.convertToLLM(stubbedMessages)
     this.config.provider.warmup(this.config.systemPrompt, llmMessages)
   }
 

@@ -16,7 +16,6 @@ import { Agent } from './core/agent.js'
 import { createOpenAIProvider } from './core/providers/openai.js'
 import type { LLMProvider } from './core/types.js'
 import { buildSystemPrompt } from './prompt/system.js'
-import { createTextSearchTool } from './tools/text-search.js'
 import { createVaultSearchTool } from './tools/vault-search.js'
 import { createReadFileTool } from './tools/read-file.js'
 import { createWriteFileTool } from './tools/write-file.js'
@@ -303,10 +302,11 @@ async function main() {
   })
   process.stderr.write(dim(`endpoint: ${baseURL}\n`))
 
-  // Tools
+  // Tools — VaultSearch is the primary search tool (semantic, via enzyme).
+  // TextSearch (grep for #tags) removed: 9B models misuse it for concepts,
+  // and VaultSearch covers those better with richer results.
   const tools = [
     createVaultSearchTool(vaultPath),
-    createTextSearchTool(vaultPath),
     createReadFileTool(vaultPath),
     createWriteFileTool(vaultPath),
   ]

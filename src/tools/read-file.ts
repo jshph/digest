@@ -10,11 +10,11 @@ export function createReadFileTool(vaultPath: string): Tool {
   return {
     definition: {
       name: 'ReadFile',
-      description: 'Read a vault file by path. Path MUST come from a TextSearch result (e.g. "inbox/2025-01-15.md"). Never guess paths or use concepts as paths.',
+      description: 'Read a vault file by path. Use paths from VaultSearch results. Never guess paths.',
       parameters: {
         path: {
           type: 'string',
-          description: 'File path from a TextSearch result (e.g. "Readwise/Articles/title.md").',
+          description: 'File path from a search result (e.g. "Articles/Title by Author.md").',
         },
       },
       required: ['path'],

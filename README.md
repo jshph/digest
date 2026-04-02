@@ -8,7 +8,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
 
-`8ms vault lookup` · `2 LLM turns` · `5-8K tokens per response` · `runs on 3B-9B local models`
+`8ms vault lookup` · `1-2 LLM turns` · `5-20K tokens per response` · `runs on 9B+ local models`
 
 </div>
 
@@ -57,83 +57,53 @@ Explore-mode agent (60-90K tokens, 5-10 turns):
   LLM → "I should search" → search → results → "I should search more"
   → search → results → "now I can answer" → response
 
-Digest with Enzyme (~5-8K tokens, 2 turns):
+Digest with Enzyme (~5-20K tokens, 1-2 turns):
   enzyme catalyze (8ms) → routing signal (~150 tokens)
-  → model decides: tools or direct response
-  → if tools: VaultSearch × 3 (~2-3K tokens each) → synthesize
-  → if no tools: respond directly from vault overview
+  → model decides: search or respond from context
+  → if search: VaultSearch → synthesize from results
+  → if no search: respond directly from vault overview + prior results
 ```
 
 The catalysts serve a dual purpose beyond retrieval:
 
-1. **Routing signal** — catalyst questions and entity names injected as a ~150-token prefetch tell the model what the vault knows about this topic. On open-ended queries ("yo", "what's on my mind"), this is enough — the model calls PassThrough and responds directly from the vault overview (total: ~5K tokens, 1.9s)
+1. **Routing signal** — catalyst questions and entity names injected as a ~150-token prefetch tell the model what the vault knows about this topic. On open-ended queries ("yo", "what's on my mind"), this is enough — the model responds directly from the vault overview
 2. **Familiarity indicator** — high-relevance catalysts mean the user has been thinking about this; no matches mean it's new territory. The model calibrates accordingly
-3. **Search targeting** — when the model does search, the entity names from the prefetch guide what it searches for. Each VaultSearch call returns 2,000-3,000 tokens of content excerpts — substantial context, but targeted rather than exploratory
+3. **Search targeting** — when the model does search, the entity names from the prefetch guide what it searches for
 
 ## Architecture
 
-### The agent loop
-
 ```
 prompt(text)
-  → clear old tool results (stabilize KV cache prefix)
-  → prefetch: enzyme catalyze on recent messages
-  → inject catalyst questions + entity names as context
-  → model: decide tools or pass through
-  → if tools: execute in parallel, then synthesize response
-  → if pass through: respond directly from vault overview
+  → prefetch: enzyme catalyze (8ms, ~150 tokens of context)
+  → model decides: search or respond from existing context
+  → if search: VaultSearch → synthesize from results
+  → if no search: respond directly
   → warm KV cache for next prompt
 ```
 
-Two turns max. No while-loop iteration. The model handles both structured decisions (tool calls) and prose synthesis.
-
-### Token budget
+The model defaults to **synthesizing from existing context** — prior search results, vault overview, conversation history. It only calls VaultSearch when the user introduces a genuinely new topic. On followup turns ("tell me more", "how does X connect"), it works with what's already there. This keeps multi-turn conversations fast: a greeting is ~5s, a deep search is ~40s, and followups that don't need new context are ~10s.
 
 | Component | Explore-mode agent | Digest |
 |-----------|-------------------|--------|
-| System prompt + instructions | 15,000-20,000 | ~2,800 (with 20-entity petri) |
-| Tool definitions | 6,000-8,000 | ~600 |
-| Search results per response | 10,000-30,000 (multiple explore rounds) | 6,000-8,000 (3 parallel VaultSearch) |
-| Tokens consumed per response | 60,000-90,000 | 5,000-8,000 |
-| **Minimum viable context window** | **32K-128K** | **8K** (open-ended) / **32K** (deep search) |
+| System prompt | 15,000-20,000 tokens | ~2,500 tokens |
+| Search results per response | 10,000-30,000 (multiple rounds) | 5,000-15,000 (1 targeted search) |
+| **Total per response** | **60,000-90,000** | **5,000-20,000** |
+| **Minimum context window** | **32K-128K** | **8K** (open-ended) / **32K** (deep search) |
 
-Digest's base overhead is ~3,400 tokens (system + tools). On a 32K window with a 20-entity vault, that leaves ~29K for search results and conversation. The key difference isn't just overhead size — it's that enzyme's 8ms vector lookup replaces what would be multiple LLM-decided search rounds, each costing a full inference pass.
-
-### Cache-aware prompt structure
-
-The system prompt is split into blocks with explicit cache hints:
-
-```
-CACHED (stable across all turns):
-  [single block] identity + tool guidance + context rules + enzyme petri overview
-
-UNCACHED (may change):
-  memory (MEMORY.md)
-  date/env
-```
-
-For local models (llama.cpp, LM Studio), the append-only message strategy during the tool-call loop ensures the inference server's KV cache stays valid — verified via debug logging with prefix stability checks.
-
-### KV cache warming
-
-Three points where the cache is warmed:
-1. **Startup**: system prompt sent to the model before the user types
-2. **During tool turn**: main model warms its prefix in parallel while tools execute
-3. **After response**: stubbed prefix sent so the next prompt gets a cache hit immediately
-
-On local inference (LM Studio), this reduced total latency from 2:25 to 1:34 for a typical search query.
+For implementation details, see:
+- **[docs/architecture.md](docs/architecture.md)** — agent loop, caching, synthesis directives, token budget
+- **[docs/qwen-llama-cpp.md](docs/qwen-llama-cpp.md)** — Qwen Jinja template gotchas, XML handling, 9B model limitations
+- **[docs/modal-gpu-testing.md](docs/modal-gpu-testing.md)** — GPU test harness for faster iteration
 
 ## Tools
 
 | Tool | Purpose | When |
 |------|---------|------|
-| `VaultSearch` | Semantic search via `enzyme catalyze` | Model finds specific content by concept |
-| `TextSearch` | Grep for `#tags` and `[[wikilinks]]` | User references vault entities explicitly |
-| `ReadFile` | Read full note by path | Need more than excerpts |
+| `VaultSearch` | Semantic search via `enzyme catalyze` | Model needs content on a new topic |
+| `ReadFile` | Read full note by path | User wants to go deeper into a specific note |
 | `WriteFile` | Write/create a note | Drafting |
-| `PassThrough` | Signal: no search needed | Open-ended or conversational prompts |
 
-TextSearch is strictly for structural vault entities — tags and wikilinks that exist verbatim in markdown. It never searches for phrases or concepts. That distinction is enforced in the tool description (one sentence: "Find notes by #tag or [[wikilink]]. Omit # for tags. Never use for phrases or concepts.") and validated through prompt tuning against Haiku-class models.
+VaultSearch is the primary retrieval tool — expensive (returns 5-15K tokens of excerpts) but comprehensive. The system prompt tells the model to prefer synthesizing from existing results and only search for genuinely new topics. On followup turns ("tell me more", "how does X connect to Y"), the model typically responds from context rather than re-searching.
 
 ## Running it
 
@@ -163,25 +133,24 @@ Any OpenAI-compatible endpoint works — OpenRouter, LM Studio, Ollama, vLLM, et
 The codebase is designed to be read top-to-bottom as a reference for building minimal agents:
 
 1. **[src/core/types.ts](src/core/types.ts)** — Every type in the system. Start here.
-2. **[src/core/agent.ts](src/core/agent.ts)** — The agent loop: prefetch, tool routing, KV cache warming.
+2. **[src/core/agent.ts](src/core/agent.ts)** — The agent loop: prefetch, unified tool loop, KV cache warming.
 3. **[src/context/prefetch.ts](src/context/prefetch.ts)** — Automatic vault context retrieval via Enzyme catalyze.
-4. **[src/tools/text-search.ts](src/tools/text-search.ts)** — Entity search (#tags, [[wikilinks]]) via grep.
-5. **[src/tools/vault-search.ts](src/tools/vault-search.ts)** — Semantic search via Enzyme catalyze (tool version).
-6. **[src/context/compact.ts](src/context/compact.ts)** — Conversation summarization for small context windows.
-7. **[src/core/providers/openai.ts](src/core/providers/openai.ts)** — OpenAI-compatible provider with KV cache warming.
-8. **[src/prompt/system.ts](src/prompt/system.ts)** — Cache-aware system prompt construction.
-9. **[src/core/debug.ts](src/core/debug.ts)** — JSONL debug logging for prompt tuning.
+4. **[src/tools/vault-search.ts](src/tools/vault-search.ts)** — Semantic search via Enzyme catalyze.
+5. **[src/context/compact.ts](src/context/compact.ts)** — Conversation summarization for small context windows.
+6. **[src/core/providers/openai.ts](src/core/providers/openai.ts)** — OpenAI-compatible provider with KV cache warming and Qwen XML stripping.
+7. **[src/prompt/system.ts](src/prompt/system.ts)** — Cache-aware system prompt construction.
+8. **[src/core/debug.ts](src/core/debug.ts)** — JSONL debug logging for prompt tuning.
 
 ## How it compares to Claude Code SDK
 
 Claude Code's SDK spawns a subprocess, pipes JSONL over stdio, and gives you the full Claude Code agent — permissions, hooks, MCP tools, session persistence. It's powerful, but it's also 70K+ LOC, Anthropic-only, and inherits the explore-mode token economics: the agent decides to search, reads results, decides to search again, and burns 60-90K tokens per response.
 
-Digest is a 2,700 LOC in-process agent loop. You call `agent.prompt()` directly. The `tool()` helper and Read/Write tools mirror the CC SDK's signatures, so porting is straightforward. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking, so a complete response costs 5-8K tokens instead of 60-90K.
+Digest is a 2,700 LOC in-process agent loop. You call `agent.prompt()` directly. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking.
 
 | | Claude Code SDK | Digest |
 |---|---|---|
-| Tokens per response | 60,000-90,000 (explore loop) | 5,000-8,000 (prefetch + 2 turns) |
-| LLM round trips | 5-10 | 2 |
+| Tokens per response | 60,000-90,000 (explore loop) | 5,000-20,000 (prefetch + 1-2 turns) |
+| LLM round trips | 5-10 | 1-2 |
 | Runtime | Subprocess (spawns CLI, stdio JSONL) | In-process (`agent.prompt()`) |
 | Providers | Anthropic only | Any OpenAI-compatible endpoint |
 | Size | ~70K LOC | ~2,700 LOC |
@@ -190,33 +159,29 @@ The tradeoff: you lose sessions, permissions, subagents, and the full built-in t
 
 See **[MIGRATION.md](MIGRATION.md)** for the full mapping: tool definitions, streaming events, provider setup, and what you gain/lose.
 
-## Appendix: Two-model router/synthesizer split
+## GPU testing with Modal
 
-Digest supports an experimental two-model setup where a small, fast model handles tool routing and a larger model handles synthesis. The idea: a 3B model is plenty smart to decide "search or pass through?" and extract a query, while a 9B+ model writes the actual response.
+For faster iteration on prompt tuning and agent behavior, Digest includes a Modal deployment that runs the same llama-server on a cloud GPU. This mirrors the local Mac setup with 3-5x faster inference.
 
 ```bash
-# Two-model setup (experimental)
-export OPENAI_API_KEY=sk-or-...
-export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-npx @jshph/digest ~/vault --model qwen/qwen3.5-9b \
-  --router-model mistralai/ministral-3b-2512
+# Setup (one-time)
+python3 -m venv .venv && source .venv/bin/activate
+pip install modal && modal profile activate <your-profile>
+
+# Dev mode (streams logs, hot-reloads)
+modal serve modal_llama.py
+
+# Multi-turn test against Modal
+printf 'hey\nexplore craft vs AI\nsay more about that\n' | \
+  OPENAI_BASE_URL=<modal-url> OPENAI_MODEL=qwen/qwen3.5-9b npx @jshph/digest
 ```
 
-When `--router-model` is set, the agent loop changes:
+Uses the pre-built `ghcr.io/ggml-org/llama.cpp:server-cuda` image — native C++ llama-server with CUDA, zero compilation. Model is baked into the image (~2 min first build, then cached).
 
-| | Router (3B) | Synthesizer (9B) |
-|---|---|---|
-| Purpose | Decide: search or pass through | Write the response |
-| Tools | Search, PassThrough | None |
-| Output | Tool-call JSON only | Prose only |
-| Speed | ~400ms (pass through), ~2s (tools) | ~5s |
+| Metric | M5 (local) | L4 (Modal) | Speedup |
+|--------|-----------|-----------|---------|
+| Prefill | 350-420 tok/s | 2,100 tok/s | 5x |
+| Generation | 16-19 tok/s | 36 tok/s | 2x |
+| 4-turn session | ~220s | ~70s | 3x |
 
-The synthesizer never sees tool definitions on the response turn. This prevents it from re-searching instead of answering — a common failure mode when small models have tools available.
-
-**Why this should work well in theory**: the routing decision is a classification task (search vs. no search) that doesn't need a large model. Separating it means the main model's context window is never polluted with tool definitions on the synthesis turn, and you can run both models in parallel on Apple Silicon (router on efficiency cores while main model warms its KV cache). In practice, a single capable model (32B+) handles both roles well enough that the complexity of two models may not be worth it for most users.
-
-Real numbers from a follow-up query (OpenRouter, Qwen 9B + Ministral 3B):
-- 3 parallel VaultSearch calls: 2,442 + 2,918 + 1,962 tokens of results
-- Router decision: 830ms, 71 output tokens
-- Synthesis: 7.3s to first token, ~600 tokens of response
-- Total: ~8K tokens consumed, 2 turns
+See **[docs/modal-gpu-testing.md](docs/modal-gpu-testing.md)** for full setup details.
