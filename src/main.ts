@@ -498,14 +498,10 @@ async function main() {
   // Piped mode: read all stdin, process the first non-empty line, exit.
   // Interactive mode: REPL loop.
   if (!process.stdin.isTTY) {
-    const lines: string[] = []
     const rl = createInterface({ input: process.stdin })
     for await (const line of rl) {
       const trimmed = line.trim()
-      if (trimmed) lines.push(trimmed)
-    }
-    if (lines.length > 0) {
-      await agent.prompt(lines.join('\n'))
+      if (trimmed) await agent.prompt(trimmed)
     }
     process.exit(0)
   }
