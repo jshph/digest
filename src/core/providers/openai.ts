@@ -194,6 +194,16 @@ async function* streamOpenAI(
       }
     }
 
+    // Strip <tool_call> XML from text when structured tool calls were
+    // also parsed. Qwen emits tool calls both as structured deltas AND
+    // as XML in text content — the structured ones are canonical.
+    if (toolCalls.size > 0 && textAccumulator) {
+      textAccumulator = textAccumulator
+        .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+        .replace(/<tool_call>[\s\S]*/g, '')  // unclosed trailing block
+        .trim()
+    }
+
     // Build content blocks
     if (textAccumulator) {
       contentBlocks.push({ type: 'text', text: textAccumulator })
