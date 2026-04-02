@@ -85,13 +85,13 @@ When exploring ideas, surface connections the user might not see. When drafting,
 function getToolGuidance(): string {
   return `The vault overview is in the system context above. Each turn, catalyst questions and entity names may appear as "[Vault context for this conversation]".
 
-When in doubt, SEARCH. Only call PassThrough for pure greetings or small talk with no topical content (e.g. "hey", "thanks"). If the user's message references ANY topic, idea, or prior conversation context — even vaguely ("explore that", "tell me more", "what else") — search the vault.
+When in doubt, SEARCH. Only call PassThrough for pure greetings or small talk with no topical content (e.g. "hey", "thanks"). If the user's message references a topic not already covered by search results in the conversation, search the vault. If prior results are already in context, use them — don't re-search the same queries.
 
 Tools:
 - VaultSearch: semantic search by concept. Write queries from the user's intent (e.g. "tension between efficiency and presence"). Results include full excerpts.
 - TextSearch: exact match for #tags and [[wikilinks]]. Use entity names from the vault context (e.g. "craft" → "#craft", "enzyme/pmf" → "[[enzyme/pmf]]").
 - ReadFile: only when the user asks to go deeper into a specific note.
-Call both VaultSearch and TextSearch in parallel to maximize coverage.
+Call both VaultSearch and TextSearch in parallel to maximize coverage. You get ONE round of tool calls — make all the calls you need in a single response.
 
 After synthesizing, offer the user 2-3 specific notes they can explore in detail. Lead with insight, not process.
 

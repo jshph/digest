@@ -399,6 +399,26 @@ async function main() {
   let turnCount = 0
   let currentToolCalls: { name: string; id: string; args: string }[] = []
 
+  // Braille spinner while waiting for first output after prompt
+  const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+  let waitSpinner: ReturnType<typeof setInterval> | null = null
+  function startWaitSpinner() {
+    if (!isTTY) return
+    let frame = 0
+    process.stderr.write(`  ${brailleFrames[0]}`)
+    waitSpinner = setInterval(() => {
+      frame = (frame + 1) % brailleFrames.length
+      process.stderr.write(`\r  ${brailleFrames[frame]}`)
+    }, 80)
+  }
+  function stopWaitSpinner() {
+    if (waitSpinner) {
+      clearInterval(waitSpinner)
+      waitSpinner = null
+      process.stderr.write('\r\x1b[K')
+    }
+  }
+
   // Timing
   let promptStartTime = 0       // when user hits enter
   let turnStartTime = 0         // when a turn begins
@@ -415,6 +435,7 @@ async function main() {
       case 'agent_start':
         promptStartTime = Date.now()
         firstTokenEmitted = false
+        startWaitSpinner()
         break
 
       case 'prefetch_start':
@@ -423,6 +444,7 @@ async function main() {
         break
 
       case 'tool_call_start': {
+        stopWaitSpinner()
         const query = (event.args.query as string) || (event.args.path as string) || ''
         const preview = query.slice(0, 80)
         currentToolCalls.push({ name: event.name, id: event.id, args: preview })
@@ -465,6 +487,7 @@ async function main() {
         break
 
       case 'text_delta':
+        stopWaitSpinner()
         if (!firstTokenEmitted) {
           firstTokenEmitted = true
           firstTokenTime = Date.now()
@@ -481,6 +504,7 @@ async function main() {
         break
 
       case 'error':
+        stopWaitSpinner()
         process.stderr.write(c.red(`\n  ✗ ${event.error}\n`))
         break
 

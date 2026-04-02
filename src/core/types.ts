@@ -166,6 +166,7 @@ export interface LLMProvider {
     messages: LLMMessage[],
     tools: ToolDefinition[],
     signal?: AbortSignal,
+    toolChoice?: 'auto' | 'required' | 'none',
   ) => AsyncIterable<StreamEvent>
 
   estimateTokens: (text: string) => number

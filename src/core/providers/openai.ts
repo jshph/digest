@@ -38,8 +38,8 @@ export function createOpenAIProvider(config: OpenAIProviderConfig): LLMProvider 
   const { baseURL, model, apiKey, maxTokens = 2048, toolChoice } = config
 
   return {
-    stream: (systemPrompt, messages, tools, signal) =>
-      streamOpenAI(baseURL, model, apiKey, maxTokens, toolChoice, systemPrompt, messages, tools, signal),
+    stream: (systemPrompt, messages, tools, signal, perCallToolChoice) =>
+      streamOpenAI(baseURL, model, apiKey, maxTokens, perCallToolChoice ?? toolChoice, systemPrompt, messages, tools, signal),
     estimateTokens: roughTokenEstimate,
     warmup: (systemPrompt, messages) =>
       warmupKVCache(baseURL, model, apiKey, systemPrompt, messages),
@@ -60,10 +60,10 @@ async function* streamOpenAI(
   // Flatten system prompt blocks into a single string (no cache control)
   let systemContent = systemBlocks.map(b => b.text).join('\n\n')
 
-  // When no tools are provided, suppress models that hallucinate tool-call
-  // XML (e.g. Qwen's <tool_call> format) in their text output.
+  // Only mutate system prompt when no tools are sent (fallback path).
+  // When tools are present, keep it stable for KV cache prefix reuse.
   if (tools.length === 0) {
-    systemContent += '\n\nDo not emit tool calls, tool-call XML, or tool names like "PassThrough". Respond in natural language only.'
+    systemContent += '\n\nDo not emit tool calls, tool-call XML, or tool names. Respond in natural language only.'
   }
 
   const openaiMessages: any[] = [
@@ -292,9 +292,15 @@ function warmupKVCache(
   messages: LLMMessage[],
 ): void {
   const systemContent = systemBlocks.map(b => b.text).join('\n\n')
+  const mapped = messages.map(toOpenAIFormat)
+  // Ensure last message is user-role — some chat templates (Qwen)
+  // reject conversations ending with assistant messages.
+  if (mapped.length === 0 || mapped[mapped.length - 1].role !== 'user') {
+    mapped.push({ role: 'user', content: '.' })
+  }
   const openaiMessages: any[] = [
     { role: 'system', content: systemContent },
-    ...messages.map(toOpenAIFormat),
+    ...mapped,
   ]
 
   const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`

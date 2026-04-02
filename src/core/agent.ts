@@ -313,18 +313,27 @@ export class Agent {
     }
     await this.emit({ type: 'turn_end', usage: firstResponse.usage })
 
-    // Synthesis turn: main model sees tool results and responds.
+    // Synthesis turn: try with tools + tool_choice=none for prefix
+    // stability. If the backend ignores tool_choice (llama.cpp) and the
+    // model emits only tool calls, discard and retry without tools.
     if (!signal.aborted) {
-      this.messages.push({
-        role: 'user',
-        content: 'You have enough context now. Respond to the user with what you have gathered. Do not call any more tools.',
-        timestamp: Date.now(),
-      } satisfies UserMessage)
       await this.emit({ type: 'turn_start' })
       const finalResponse = await this.callModel(signal, 'main')
       if (finalResponse) {
-        this.messages.push(finalResponse)
-        await this.emit({ type: 'turn_end', usage: finalResponse.usage })
+        const hasText = finalResponse.content.some(b => b.type === 'text' && b.text.trim())
+        if (hasText) {
+          this.messages.push(finalResponse)
+          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
+        } else {
+          // tool_choice=none was ignored — retry without tools
+          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
+          await this.emit({ type: 'turn_start' })
+          const retryResponse = await this.callModel(signal, 'main-no-tools')
+          if (retryResponse) {
+            this.messages.push(retryResponse)
+            await this.emit({ type: 'turn_end', usage: retryResponse.usage })
+          }
+        }
       }
     }
 
@@ -396,15 +405,14 @@ export class Agent {
 
   private lastSerializedPrefix: string | null = null
 
-  private async callModel(signal: AbortSignal, which: 'main' | 'main-with-tools' | 'router' = 'main'): Promise<AssistantMessage | null> {
+  private async callModel(signal: AbortSignal, which: 'main' | 'main-with-tools' | 'main-no-tools' | 'router' = 'main'): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
-    // Router gets simplified tools (Search + PassThrough).
-    // Main model gets full tools on turn 1 (when no router) but not on synthesis.
+    const mainTools = this.config.tools.filter(t => t.definition.name !== 'PassThrough').map(t => t.definition)
     const toolDefs = which === 'router'
       ? Agent.ROUTER_TOOLS
-      : which === 'main-with-tools'
-        ? this.config.tools.filter(t => t.definition.name !== 'PassThrough').map(t => t.definition)
-        : []
+      : which === 'main-no-tools'
+        ? []
+        : mainTools  // Include tools so prefix stays stable for KV cache
     const provider = which === 'router' && this.config.routerProvider
       ? this.config.routerProvider
       : this.config.provider  // 'main' and 'main-with-tools' both use main provider
@@ -415,11 +423,15 @@ export class Agent {
     await logSystemPrompt(this.config.systemPrompt)
     await logLLMRequest(llmMessages, toolDefs, this.estimateTokens())
 
+    // Synthesis turns ('main') include tools for prefix stability but
+    // set tool_choice=none so the model can't actually call them.
+    const toolChoice = which === 'main' ? 'none' as const : undefined
     const stream = provider.stream(
       this.config.systemPrompt,
       llmMessages,
       toolDefs,
       signal,
+      toolChoice,
     )
 
     for await (const event of stream) {
