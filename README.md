@@ -141,9 +141,9 @@ The codebase is designed to be read top-to-bottom as a reference for building mi
 
 ## How it compares to Claude Code SDK
 
-Claude Code's SDK spawns a subprocess, pipes JSONL over stdio, and gives you the full Claude Code agent — permissions, hooks, MCP tools, session persistence. It's powerful, but it's also 70K+ LOC, Anthropic-only, and inherits the explore-mode token economics: the agent decides to search, reads results, decides to search again, and burns 60-90K tokens per response.
+Claude Code's SDK spawns a subprocess, pipes JSONL over stdio, and gives you the full Claude Code agent — permissions, hooks, MCP tools, session persistence. It's Anthropic-only and inherits explore-mode token economics: the agent decides to search, reads results, decides to search again.
 
-Digest is a ~2,400 LOC in-process agent loop. You call `agent.prompt()` directly. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking.
+Digest is a ~2,400 LOC in-process agent loop. You call `agent.prompt()` directly. Enzyme's pre-computed index means the agent has context before it starts thinking, so it searches less and synthesizes more.
 
 | | Claude Code SDK | Digest |
 |---|---|---|
@@ -151,9 +151,8 @@ Digest is a ~2,400 LOC in-process agent loop. You call `agent.prompt()` directly
 | LLM round trips | 5-10 | 1-2 |
 | Runtime | Subprocess (spawns CLI, stdio JSONL) | In-process (`agent.prompt()`) |
 | Providers | Anthropic only | Any OpenAI-compatible endpoint |
-| Size | ~70K LOC | ~2,400 LOC |
 
-The tradeoff: you lose sessions, permissions, subagents, and the full built-in tool suite (Bash, Glob, Grep, etc.). You gain provider freedom, explicit context control, and 10x fewer tokens per response.
+The tradeoff: you lose sessions, permissions, subagents, and the full built-in tool suite (Bash, Glob, Grep, etc.). You gain provider freedom, explicit context control, and fewer tokens per response.
 
 See **[MIGRATION.md](MIGRATION.md)** for the full mapping: tool definitions, streaming events, provider setup, and what you gain/lose.
 
