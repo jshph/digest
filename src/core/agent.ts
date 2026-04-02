@@ -137,8 +137,8 @@ export class Agent {
   //            but model CAN still call tools if it needs more context
   //   Max 3 tool rounds, then force text-only response
   //
-  // Text is suppressed on tool-calling turns (Qwen XML noise in text).
-  // Re-emitted from the stored response when no tools are called.
+  // Text streams live on all turns. The XML filter in callModel strips
+  // <tool_call> tags that Qwen emits as text alongside structured calls.
 
   private async runLoop(): Promise<void> {
     this.abortController = new AbortController()
@@ -173,13 +173,12 @@ export class Agent {
         injectedDirective = true
       }
 
-      // Call with tools. Suppress text (Qwen emits XML as text on
-      // tool-calling turns). We re-emit text if no tools are called.
+      // Stream text live on all turns. The XML filter in callModel
+      // strips <tool_call> tags if Qwen emits them as text.
       await this.emit({ type: 'turn_start' })
       const isLastRound = toolRound >= maxToolRounds
       const response = await this.callModel(signal, {
         tools: !isLastRound,
-        streamText: false,
       })
 
       // Remove ephemeral directive before modifying messages further
@@ -201,14 +200,8 @@ export class Agent {
         (b): b is ToolCallContent => b.type === 'tool_call',
       )
 
-      // No tool calls (or last round forced no tools) — model responded.
-      // Re-emit the text that was suppressed during streaming.
+      // No tool calls — model responded. Text already streamed live.
       if (toolCalls.length === 0) {
-        for (const block of response.content) {
-          if (block.type === 'text' && block.text) {
-            await this.emit({ type: 'text_delta', text: block.text })
-          }
-        }
         this.messages.push(response)
         await this.emit({ type: 'turn_end', usage: response.usage })
         break
@@ -289,7 +282,7 @@ export class Agent {
 
   private lastSerializedPrefix: string | null = null
 
-  private async callModel(signal: AbortSignal, opts: { tools: boolean; streamText: boolean }): Promise<AssistantMessage | null> {
+  private async callModel(signal: AbortSignal, opts: { tools: boolean }): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
     const toolDefs = opts.tools
       ? this.config.tools.map(t => t.definition)
@@ -307,16 +300,14 @@ export class Agent {
       signal,
     )
 
-    const suppressText = !opts.streamText
     // Buffer for filtering <tool_call> XML from streamed text.
-    // Qwen emits tool-call XML as text even on no-tools turns.
+    // Qwen emits tool-call XML as text alongside structured tool calls.
     let textBuf = ''
 
     for await (const event of stream) {
       if (signal.aborted) return null
       switch (event.type) {
         case 'text_delta':
-          if (suppressText) break
           textBuf += event.text
           // Hold buffer if it might be start of <tool_call>
           if (textBuf.includes('<tool_call>')) {
