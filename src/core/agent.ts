@@ -126,74 +126,104 @@ export class Agent {
   }
 
   // ── The loop ─────────────────────────────────────────────────────
+  //
+  // All turns use tools → same prefix → KV cache hits.
+  // The model decides: call tools (needs context) or respond (has enough).
+  //
+  //   Turn 1: model sees user message, decides to search or respond
+  //   Turn 2+: after tool results, ephemeral directive nudges synthesis
+  //            but model CAN still call tools if it needs more context
+  //   Max 3 tool rounds, then force text-only response
+  //
+  // Text is suppressed on tool-calling turns (Qwen XML noise in text).
+  // Re-emitted from the stored response when no tools are called.
 
   private async runLoop(): Promise<void> {
     this.abortController = new AbortController()
     const { signal } = this.abortController
+    const maxToolRounds = 3
+    let toolRound = 0
 
     await this.manageContext()
 
-    // Step 1: Call model with tools. Text is suppressed during this
-    // call because Qwen emits <tool_call> XML as text content alongside
-    // structured tool calls. We'll re-emit text if no tools are called.
-    await this.emit({ type: 'turn_start' })
-    const response = await this.callModel(signal, { tools: true, streamText: false })
+    while (!signal.aborted) {
+      const hasToolResults = toolRound > 0
 
-    if (!response || signal.aborted) {
-      this.abortController = null
-      return
-    }
+      // After tool execution, inject ephemeral synthesis directive.
+      // This nudges the model to synthesize but doesn't prevent
+      // additional tool calls if it genuinely needs more context.
+      let injectedDirective = false
+      if (hasToolResults) {
+        this.messages.push({
+          role: 'user',
+          content: 'Respond to the user based on the results above. Synthesize key insights and quote relevant passages. Only search again if you need information on a genuinely different topic not covered above.',
+          timestamp: Date.now(),
+        } satisfies UserMessage)
+        injectedDirective = true
+      }
 
-    const toolCalls = response.content.filter(
-      (b): b is ToolCallContent => b.type === 'tool_call',
-    )
+      // Call with tools. Suppress text (Qwen emits XML as text on
+      // tool-calling turns). We re-emit text if no tools are called.
+      await this.emit({ type: 'turn_start' })
+      const isLastRound = toolRound >= maxToolRounds
+      const response = await this.callModel(signal, {
+        tools: !isLastRound,
+        streamText: false,
+      })
 
-    // No tool calls — the model responded directly.
-    // Re-emit the text that was suppressed during streaming.
-    if (toolCalls.length === 0) {
-      for (const block of response.content) {
-        if (block.type === 'text' && block.text) {
-          await this.emit({ type: 'text_delta', text: block.text })
+      // Remove ephemeral directive before modifying messages further
+      if (injectedDirective) {
+        // Find and remove the directive (it's the last user message
+        // before the response, but response isn't pushed yet)
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (this.messages[i].role === 'user' &&
+              (this.messages[i] as UserMessage).content.startsWith('Respond to the user')) {
+            this.messages.splice(i, 1)
+            break
+          }
         }
       }
-      this.messages.push(response)
-      await this.emit({ type: 'turn_end', usage: response.usage })
-      this.abortController = null
-      return
-    }
 
-    // Tool calls — execute in parallel, then synthesize.
-    this.messages.push(response)
-    const results = await Promise.all(
-      toolCalls.map(call =>
-        signal.aborted
-          ? Promise.resolve({ call, result: { content: 'Aborted', isError: true } })
-          : this.executeTool(call, signal).then(result => ({ call, result }))
-      ),
-    )
-    for (const { call, result } of results) {
-      this.messages.push({
-        role: 'tool_result',
-        toolCallId: call.id,
-        toolName: call.name,
-        content: result.content,
-        isError: result.isError,
-        timestamp: Date.now(),
-      } satisfies ToolResultMessage)
-    }
-    await this.emit({ type: 'turn_end', usage: response.usage })
+      if (!response || signal.aborted) break
 
-    // Step 2: Synthesis — call WITHOUT tools so model is forced to
-    // respond in text. This breaks KV cache prefix (tools change the
-    // Jinja template), costing ~7s of system prompt reprocessing.
-    // But 9B models won't reliably synthesize when tools are available.
-    if (!signal.aborted) {
-      await this.emit({ type: 'turn_start' })
-      const synthesis = await this.callModel(signal, { tools: false, streamText: true })
-      if (synthesis) {
-        this.messages.push(synthesis)
-        await this.emit({ type: 'turn_end', usage: synthesis.usage })
+      const toolCalls = response.content.filter(
+        (b): b is ToolCallContent => b.type === 'tool_call',
+      )
+
+      // No tool calls (or last round forced no tools) — model responded.
+      // Re-emit the text that was suppressed during streaming.
+      if (toolCalls.length === 0) {
+        for (const block of response.content) {
+          if (block.type === 'text' && block.text) {
+            await this.emit({ type: 'text_delta', text: block.text })
+          }
+        }
+        this.messages.push(response)
+        await this.emit({ type: 'turn_end', usage: response.usage })
+        break
       }
+
+      // Tool calls — execute in parallel
+      this.messages.push(response)
+      const results = await Promise.all(
+        toolCalls.map(call =>
+          signal.aborted
+            ? Promise.resolve({ call, result: { content: 'Aborted', isError: true } })
+            : this.executeTool(call, signal).then(result => ({ call, result }))
+        ),
+      )
+      for (const { call, result } of results) {
+        this.messages.push({
+          role: 'tool_result',
+          toolCallId: call.id,
+          toolName: call.name,
+          content: result.content,
+          isError: result.isError,
+          timestamp: Date.now(),
+        } satisfies ToolResultMessage)
+      }
+      await this.emit({ type: 'turn_end', usage: response.usage })
+      toolRound++
     }
 
     this.abortController = null
@@ -267,19 +297,39 @@ export class Agent {
     )
 
     const suppressText = !opts.streamText
+    // Buffer for filtering <tool_call> XML from streamed text.
+    // Qwen emits tool-call XML as text even on no-tools turns.
+    let textBuf = ''
 
     for await (const event of stream) {
       if (signal.aborted) return null
       switch (event.type) {
         case 'text_delta':
-          if (!suppressText) {
-            await this.emit({ type: 'text_delta', text: event.text })
+          if (suppressText) break
+          textBuf += event.text
+          // Hold buffer if it might be start of <tool_call>
+          if (textBuf.includes('<tool_call>')) {
+            // Emit everything before the tag
+            const idx = textBuf.indexOf('<tool_call>')
+            if (idx > 0) {
+              await this.emit({ type: 'text_delta', text: textBuf.slice(0, idx) })
+            }
+            // Discard from <tool_call> onward (rest will be discarded too)
+            textBuf = ''
+          } else if (!textBuf.endsWith('<') && !/<[a-z]*$/.test(textBuf)) {
+            // Safe to flush — not in the middle of a potential tag
+            await this.emit({ type: 'text_delta', text: textBuf })
+            textBuf = ''
           }
           break
         case 'thinking_delta':
           await this.emit({ type: 'thinking_delta', text: event.text })
           break
         case 'done':
+          // Flush remaining buffer (if it wasn't a tool_call tag)
+          if (textBuf && !textBuf.includes('<tool_call')) {
+            await this.emit({ type: 'text_delta', text: textBuf })
+          }
           await logLLMResponse(event.message.usage, event.message.stopReason)
           return event.message
         case 'error':
