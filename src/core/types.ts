@@ -166,7 +166,6 @@ export interface LLMProvider {
     messages: LLMMessage[],
     tools: ToolDefinition[],
     signal?: AbortSignal,
-    toolChoice?: 'auto' | 'required' | 'none',
   ) => AsyncIterable<StreamEvent>
 
   estimateTokens: (text: string) => number
@@ -204,17 +203,6 @@ export interface AgentConfig {
   tools: Tool[]
   provider: LLMProvider
   context: ContextConfig
-
-  /** Max tool-call loop iterations before forcing a text response (default: 5). */
-  maxToolTurns?: number
-
-  /**
-   * Optional smaller/faster provider for tool-call turns only.
-   * When set, tool-call turns use this provider (fast routing),
-   * and the final synthesis turn uses the main `provider`.
-   * Both must be OpenAI-compatible with the same tool format.
-   */
-  routerProvider?: LLMProvider
 
   /**
    * Pre-fetch hook — runs before each LLM call. Receives the recent

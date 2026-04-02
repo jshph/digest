@@ -30,16 +30,14 @@ export interface OpenAIProviderConfig {
   model: string
   apiKey?: string
   maxTokens?: number
-  /** Force tool calling behavior: "required" makes the model always call a tool. */
-  toolChoice?: 'auto' | 'required' | 'none'
 }
 
 export function createOpenAIProvider(config: OpenAIProviderConfig): LLMProvider {
-  const { baseURL, model, apiKey, maxTokens = 2048, toolChoice } = config
+  const { baseURL, model, apiKey, maxTokens = 2048 } = config
 
   return {
-    stream: (systemPrompt, messages, tools, signal, perCallToolChoice) =>
-      streamOpenAI(baseURL, model, apiKey, maxTokens, perCallToolChoice ?? toolChoice, systemPrompt, messages, tools, signal),
+    stream: (systemPrompt, messages, tools, signal) =>
+      streamOpenAI(baseURL, model, apiKey, maxTokens, systemPrompt, messages, tools, signal),
     estimateTokens: roughTokenEstimate,
     warmup: (systemPrompt, messages) =>
       warmupKVCache(baseURL, model, apiKey, systemPrompt, messages),
@@ -51,17 +49,15 @@ async function* streamOpenAI(
   model: string,
   apiKey: string | undefined,
   maxTokens: number,
-  toolChoice: 'auto' | 'required' | 'none' | undefined,
   systemBlocks: SystemPromptBlock[],
   messages: LLMMessage[],
   tools: ToolDefinition[],
   signal?: AbortSignal,
 ): AsyncIterable<StreamEvent> {
-  // Flatten system prompt blocks into a single string (no cache control)
   let systemContent = systemBlocks.map(b => b.text).join('\n\n')
 
-  // Only mutate system prompt when no tools are sent (fallback path).
-  // When tools are present, keep it stable for KV cache prefix reuse.
+  // When no tools are provided (synthesis turn), suppress models that
+  // hallucinate tool-call XML (e.g. Qwen's <tool_call> format).
   if (tools.length === 0) {
     systemContent += '\n\nDo not emit tool calls, tool-call XML, or tool names. Respond in natural language only.'
   }
@@ -84,7 +80,6 @@ async function* streamOpenAI(
   }
   if (openaiTools) {
     body.tools = openaiTools
-    if (toolChoice) body.tool_choice = toolChoice
   }
 
   const url = `${baseURL.replace(/\/+$/, '')}/chat/completions`
@@ -117,7 +112,6 @@ async function* streamOpenAI(
     // Parse SSE stream
     const contentBlocks: ContentBlock[] = []
     let textAccumulator = ''
-    // Track tool calls by index
     const toolCalls = new Map<number, { id: string; name: string; args: string }>()
     let inputTokens = 0
     let outputTokens = 0
@@ -149,7 +143,6 @@ async function* streamOpenAI(
           continue
         }
 
-        // Capture usage if present (final chunk in streaming mode)
         if (chunk.usage) {
           inputTokens = chunk.usage.prompt_tokens || 0
           outputTokens = chunk.usage.completion_tokens || 0
@@ -185,7 +178,6 @@ async function* streamOpenAI(
           }
         }
 
-        // Finish reason
         if (choice.finish_reason === 'tool_calls') {
           stopReason = 'tool_use'
         } else if (choice.finish_reason === 'length') {
@@ -221,7 +213,6 @@ async function* streamOpenAI(
       if (stopReason === 'end') stopReason = 'tool_use'
     }
 
-    // Estimate tokens if the provider didn't report them
     if (inputTokens === 0) {
       inputTokens = roughTokenEstimate(JSON.stringify(openaiMessages))
     }
@@ -290,9 +281,6 @@ function toOpenAIFormat(msg: LLMMessage): any {
 
 /**
  * Fire-and-forget: send a max_tokens=1 request to warm the KV cache.
- * The backend processes the full prompt into its cache slot; the single
- * generated token is discarded. When the user's next real request arrives
- * with the same prefix, prompt processing is skipped.
  */
 function warmupKVCache(
   baseURL: string,
@@ -321,7 +309,6 @@ function warmupKVCache(
     headers['Authorization'] = `Bearer ${apiKey}`
   }
 
-  // Fire and forget — don't await, don't care about the response
   fetch(url, {
     method: 'POST',
     headers,
@@ -332,7 +319,7 @@ function warmupKVCache(
       messages: openaiMessages,
     }),
   }).catch(() => {
-    // Warmup failed — not critical, next request just won't have a warm cache
+    // Warmup failed — not critical
   })
 }
 

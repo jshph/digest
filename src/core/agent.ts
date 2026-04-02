@@ -1,20 +1,16 @@
 /**
  * The agent loop.
  *
- * This is the core of the system. Everything else — tools, providers,
- * context management — exists to serve this loop.
+ * Two-step flow per user prompt:
  *
- * The loop is simple:
+ *   1. Call model WITH tools (text suppressed — models like Qwen emit
+ *      <tool_call> XML as text alongside structured calls)
+ *      - If no tool calls → re-emit suppressed text → done
+ *      - If tool calls → execute them → step 2
  *
- *   1. User sends a message
- *   2. (Context check: compact or clear old tool results if needed)
- *   3. Send conversation to the LLM
- *   4. If the LLM responds with text only → done
- *   5. If the LLM calls tools → execute them, append results, go to 2
+ *   2. Call model WITHOUT tools → synthesis streamed to user
  *
- * That's it. Claude Code does this in ~70K lines (query.ts + QueryEngine.ts).
- * The complexity there comes from permissions, MCP, IDE bridging, subagents,
- * analytics, and enterprise features. None of that is intrinsic to the loop.
+ * That's it. No router, no tool_choice, no retry logic.
  */
 
 import type {
@@ -24,8 +20,6 @@ import type {
   ContentBlock,
   LLMMessage,
   Message,
-  PrefetchResult,
-  SystemPromptBlock,
   ToolCallContent,
   ToolDefinition,
   ToolResult,
@@ -47,7 +41,6 @@ export class Agent {
   private config: AgentConfig
   private listeners: EventHandler[] = []
   private abortController: AbortController | null = null
-  private suppressTextDeltas = false
 
   constructor(config: AgentConfig) {
     this.config = config
@@ -86,19 +79,9 @@ export class Agent {
     } satisfies UserMessage)
 
     await this.emit({ type: 'agent_start' })
-
-    // Pre-fetch: run enzyme catalyze (or whatever prefetch is configured)
-    // on recent messages BEFORE the LLM sees the prompt. The results
-    // are injected as context so the model reasons about vault content
-    // immediately rather than deciding whether to search first.
     await this.runPrefetch()
-
     await this.runLoop()
     await this.emit({ type: 'agent_end' })
-
-    // Warm the KV cache for the next prompt. Clear tool results to get
-    // the stubbed prefix, then fire a max_tokens=1 request so the
-    // backend processes and caches the prefix while the user thinks.
     this.warmKVCache()
   }
 
@@ -107,21 +90,10 @@ export class Agent {
   // Runs before the first LLM call of each prompt(). Takes the last
   // few user messages, passes them to the prefetch function (typically
   // enzyme catalyze), and injects results as a context message.
-  //
-  // The model sees: [user messages...] [prefetched vault context] [latest user message]
-  //
-  // This eliminates a tool-call round trip. Instead of:
-  //   user → LLM decides to search → tool call → results → LLM responds
-  // It becomes:
-  //   user → prefetch runs in parallel → LLM sees results immediately → responds
-  //
-  // The catalysts in the results also signal whether the user has been
-  // thinking about this topic (familiar territory) or not.
 
   private async runPrefetch(): Promise<void> {
     if (!this.config.prefetch) return
 
-    // Gather recent user messages (last 3) as search context
     const recentUserMessages = this.messages
       .filter((m): m is UserMessage => m.role === 'user')
       .slice(-3)
@@ -153,147 +125,45 @@ export class Agent {
     }
   }
 
-  // ── Router tools ────────────────────────────────────────────────
-  //
-  // The router sees a simplified tool set: Search(query) + PassThrough.
-  // This reduces a 3B model's job to a binary decision + query extraction.
-  // When the router picks Search, the agent fans out to VaultSearch +
-  // TextSearch in parallel using the router's query.
-
-  private static readonly ROUTER_TOOLS: ToolDefinition[] = [
-    {
-      name: 'Search',
-      description: 'The user\'s message references a topic, idea, or prior context. Search the vault.',
-      parameters: {},
-    },
-    {
-      name: 'PassThrough',
-      description: 'Pure greeting or small talk with no topical content (e.g. "hey", "thanks").',
-      parameters: {},
-    },
-  ]
-
   // ── The loop ─────────────────────────────────────────────────────
 
   private async runLoop(): Promise<void> {
     this.abortController = new AbortController()
     const { signal } = this.abortController
-    const maxTurns = this.config.maxToolTurns ?? 5
-    let turn = 0
 
-    const hasRouter = !!this.config.routerProvider
-
-    // Turn 1: router (if available) decides tools or text.
-    // Suppress text_delta during router turn — we don't want its prose.
     await this.manageContext()
+
+    // Step 1: Call model with tools. Text is suppressed during this
+    // call because Qwen emits <tool_call> XML as text content alongside
+    // structured tool calls. We'll re-emit text if no tools are called.
     await this.emit({ type: 'turn_start' })
+    const response = await this.callModel(signal, true)
 
-    // Warm the main model's KV cache while the router works
-    if (hasRouter && this.config.provider.warmup) {
-      this.config.provider.warmup(
-        this.config.systemPrompt,
-        this.toLLMMessages(),
-      )
-    }
-
-    this.suppressTextDeltas = hasRouter
-    const firstResponse = await this.callModel(signal, hasRouter ? 'router' : 'main-with-tools')
-    this.suppressTextDeltas = false
-
-    if (!firstResponse || signal.aborted) {
+    if (!response || signal.aborted) {
       this.abortController = null
       return
     }
 
-    const toolCalls = firstResponse.content.filter(
+    const toolCalls = response.content.filter(
       (b): b is ToolCallContent => b.type === 'tool_call',
     )
 
-    // PassThrough or no tool calls.
-    const isPassThrough = toolCalls.length === 1 && toolCalls[0].name === 'PassThrough'
-    if (toolCalls.length === 0 || isPassThrough) {
-      if (hasRouter) {
-        // Router decided no tools needed — discard its response,
-        // call the main model fresh (without tools) for the real answer.
-        await this.emit({ type: 'turn_end', usage: firstResponse.usage })
-        await this.emit({ type: 'turn_start' })
-        const directResponse = await this.callModel(signal, 'main')
-        if (directResponse) {
-          this.messages.push(directResponse)
-          await this.emit({ type: 'turn_end', usage: directResponse.usage })
+    // No tool calls — the model responded directly.
+    // Re-emit the text that was suppressed during streaming.
+    if (toolCalls.length === 0) {
+      for (const block of response.content) {
+        if (block.type === 'text' && block.text) {
+          await this.emit({ type: 'text_delta', text: block.text })
         }
-      } else {
-        // No router — the first response IS the main model's answer.
-        this.messages.push(firstResponse)
-        await this.emit({ type: 'turn_end', usage: firstResponse.usage })
       }
+      this.messages.push(response)
+      await this.emit({ type: 'turn_end', usage: response.usage })
       this.abortController = null
       return
     }
 
-    // Router called Search → run VaultSearch + TextSearch, inject results
-    // as context, then let the main model synthesize.
-    if (hasRouter && toolCalls.some(c => c.name === 'Search')) {
-      // Build query from recent user messages (same pattern as prefetch)
-      const query = this.messages
-        .filter((m): m is UserMessage => m.role === 'user')
-        .slice(-3)
-        .map(m => m.content)
-        .join(' ')
-        .slice(0, 300)
-
-      const searchTools = this.config.tools.filter(
-        t => t.definition.name === 'VaultSearch' || t.definition.name === 'TextSearch',
-      )
-
-      // Execute searches in parallel
-      const results = await Promise.all(
-        searchTools.map(async tool => {
-          const call: ToolCallContent = {
-            type: 'tool_call', id: `search_${tool.definition.name}`,
-            name: tool.definition.name, arguments: { query },
-          }
-          await this.emit({ type: 'tool_call_start', id: call.id, name: call.name, args: call.arguments })
-          const result = signal.aborted
-            ? { content: 'Aborted', isError: true }
-            : await tool.execute(call.arguments, signal)
-          await logToolCall(call.name, call.arguments, result.content, result.isError)
-          await this.emit({ type: 'tool_call_end', id: call.id, name: call.name, result })
-          return { name: tool.definition.name, result }
-        }),
-      )
-
-      // Inject results as a user message (like prefetch)
-      const searchContent = results
-        .filter(r => !r.result.isError)
-        .map(r => `[${r.name} results]\n${r.result.content}`)
-        .join('\n\n')
-
-      if (searchContent) {
-        this.messages.push({
-          role: 'user',
-          content: searchContent,
-          timestamp: Date.now(),
-        } satisfies UserMessage)
-      }
-
-      await this.emit({ type: 'turn_end', usage: firstResponse.usage })
-
-      // Synthesis turn: main model responds with search context
-      if (!signal.aborted) {
-        await this.emit({ type: 'turn_start' })
-        const finalResponse = await this.callModel(signal, 'main')
-        if (finalResponse) {
-          this.messages.push(finalResponse)
-          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
-        }
-      }
-      this.abortController = null
-      return
-    }
-
-    // Non-router path: tools called directly → execute in parallel
-    this.messages.push(firstResponse)
+    // Tool calls — execute in parallel, then synthesize.
+    this.messages.push(response)
     const results = await Promise.all(
       toolCalls.map(call =>
         signal.aborted
@@ -311,29 +181,15 @@ export class Agent {
         timestamp: Date.now(),
       } satisfies ToolResultMessage)
     }
-    await this.emit({ type: 'turn_end', usage: firstResponse.usage })
+    await this.emit({ type: 'turn_end', usage: response.usage })
 
-    // Synthesis turn: try with tools + tool_choice=none for prefix
-    // stability. If the backend ignores tool_choice (llama.cpp) and the
-    // model emits only tool calls, discard and retry without tools.
+    // Step 2: Synthesis — call without tools, text streams to user.
     if (!signal.aborted) {
       await this.emit({ type: 'turn_start' })
-      const finalResponse = await this.callModel(signal, 'main')
-      if (finalResponse) {
-        const hasText = finalResponse.content.some(b => b.type === 'text' && b.text.trim())
-        if (hasText) {
-          this.messages.push(finalResponse)
-          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
-        } else {
-          // tool_choice=none was ignored — retry without tools
-          await this.emit({ type: 'turn_end', usage: finalResponse.usage })
-          await this.emit({ type: 'turn_start' })
-          const retryResponse = await this.callModel(signal, 'main-no-tools')
-          if (retryResponse) {
-            this.messages.push(retryResponse)
-            await this.emit({ type: 'turn_end', usage: retryResponse.usage })
-          }
-        }
+      const synthesis = await this.callModel(signal, false)
+      if (synthesis) {
+        this.messages.push(synthesis)
+        await this.emit({ type: 'turn_end', usage: synthesis.usage })
       }
     }
 
@@ -364,19 +220,8 @@ export class Agent {
   }
 
   // ── Context management ───────────────────────────────────────────
-  //
-  // Two mechanisms keep the conversation within the token budget:
-  //
-  //   1. Tool result clearing — old results are replaced with one-line
-  //      stubs. Cheap, runs every turn. (see context/clearing.ts)
-  //
-  //   2. Compaction — when the estimated token count exceeds the
-  //      threshold, older messages are summarized into a single
-  //      SystemCompactMessage. (see context/compact.ts)
 
   private async manageContext(): Promise<void> {
-    // Note: tool result clearing is done in prompt() — not here —
-    // so the prefix stays stable during the tool-call loop (KV cache).
     if (shouldCompact(this.estimateTokens(), this.config.context)) {
       await this.emit({ type: 'compact_start' })
       const beforeCount = this.messages.length
@@ -397,48 +242,37 @@ export class Agent {
   }
 
   // ── LLM call ─────────────────────────────────────────────────────
-  //
-  // Converts the internal Message[] to LLMMessage[] (what the model
-  // sees), streams the response, and emits text/thinking deltas as
-  // they arrive. Returns the completed AssistantMessage, or null on
-  // error/abort.
 
   private lastSerializedPrefix: string | null = null
 
-  private async callModel(signal: AbortSignal, which: 'main' | 'main-with-tools' | 'main-no-tools' | 'router' = 'main'): Promise<AssistantMessage | null> {
+  private async callModel(signal: AbortSignal, withTools: boolean): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
-    const mainTools = this.config.tools.filter(t => t.definition.name !== 'PassThrough').map(t => t.definition)
-    const toolDefs = which === 'router'
-      ? Agent.ROUTER_TOOLS
-      : which === 'main-no-tools'
-        ? []
-        : mainTools  // Include tools so prefix stays stable for KV cache
-    const provider = which === 'router' && this.config.routerProvider
-      ? this.config.routerProvider
-      : this.config.provider  // 'main' and 'main-with-tools' both use main provider
+    const toolDefs = withTools
+      ? this.config.tools.map(t => t.definition)
+      : []
 
-    // Check KV cache prefix stability across turns
     this.checkPrefixStability(llmMessages)
 
     await logSystemPrompt(this.config.systemPrompt)
     await logLLMRequest(llmMessages, toolDefs, this.estimateTokens())
 
-    // Synthesis turns ('main') include tools for prefix stability but
-    // set tool_choice=none so the model can't actually call them.
-    const toolChoice = which === 'main' ? 'none' as const : undefined
-    const stream = provider.stream(
+    const stream = this.config.provider.stream(
       this.config.systemPrompt,
       llmMessages,
       toolDefs,
       signal,
-      toolChoice,
     )
+
+    // Suppress text on tool-calling turns (withTools=true).
+    // Qwen emits <tool_call> XML as text — we don't want that streamed.
+    // If no tools are called, the agent re-emits text from the response.
+    const suppressText = withTools
 
     for await (const event of stream) {
       if (signal.aborted) return null
       switch (event.type) {
         case 'text_delta':
-          if (!this.suppressTextDeltas) {
+          if (!suppressText) {
             await this.emit({ type: 'text_delta', text: event.text })
           }
           break
@@ -457,9 +291,6 @@ export class Agent {
     return null
   }
 
-  // Convert internal messages to the format the LLM provider expects.
-  // SystemCompactMessages become user messages with a framing prefix
-  // so the model knows it's reading a summary, not the original exchange.
   private toLLMMessages(): LLMMessage[] {
     return this.messages.flatMap((msg): LLMMessage[] => {
       switch (msg.role) {
@@ -475,16 +306,9 @@ export class Agent {
     })
   }
 
-  /**
-   * Compare the serialized prompt prefix against the previous turn.
-   * If the prefix diverges, KV cache reuse is broken for that turn.
-   * Logs to debug output when enabled.
-   */
   private checkPrefixStability(llmMessages: LLMMessage[]): void {
     if (!isDebugEnabled()) return
 
-    // Serialize system prompt + all messages except the last one
-    // (the last message is the new content — everything before it should match)
     const systemSerialized = this.config.systemPrompt.map(b => b.text).join('\n\n')
     const msgsSerialized = llmMessages.map(m => {
       if (m.role === 'user') return `user:${m.content}`
@@ -495,7 +319,6 @@ export class Agent {
     const fullSerialized = systemSerialized + '\n' + msgsSerialized
 
     if (this.lastSerializedPrefix !== null) {
-      // Find where current and previous diverge
       const prev = this.lastSerializedPrefix
       const curr = fullSerialized
       const minLen = Math.min(prev.length, curr.length)
@@ -508,11 +331,8 @@ export class Agent {
       }
 
       if (divergeAt === -1 && prev.length <= curr.length) {
-        // Previous is a prefix of current — cache should hit
         logPrefixCheck(true, prev.length, curr.length, null)
       } else {
-        // Divergence found
-        const ctx = curr.slice(Math.max(0, divergeAt - 40), divergeAt + 40)
         logPrefixCheck(false, prev.length, curr.length, {
           position: divergeAt,
           prevSnippet: prev.slice(Math.max(0, divergeAt - 20), divergeAt + 20),
@@ -524,11 +344,6 @@ export class Agent {
     this.lastSerializedPrefix = fullSerialized
   }
 
-  /**
-   * Fire-and-forget: clear old tool results to get the stubbed prefix,
-   * then send a warmup request so the backend caches it while the user
-   * is thinking about their next message.
-   */
   private warmKVCache(): void {
     if (!this.config.provider.warmup) return
 
