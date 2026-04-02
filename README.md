@@ -15,7 +15,7 @@
 ```bash
 export OPENAI_API_KEY=sk-or-...
 export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_MODEL=qwen/qwen3-32b
+export OPENAI_MODEL=zai-org/glm-4.7-flash
 cd ~/your-vault && npx @jshph/digest
 ```
 
@@ -109,7 +109,7 @@ VaultSearch is the primary retrieval tool — expensive (returns 5-15K tokens of
 # Set up once in your shell profile
 export OPENAI_API_KEY=sk-or-...
 export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_MODEL=qwen/qwen3-32b
+export OPENAI_MODEL=zai-org/glm-4.7-flash
 
 # Then just run in your vault
 cd ~/vault && npx @jshph/digest
@@ -118,13 +118,30 @@ cd ~/vault && npx @jshph/digest
 npx @jshph/digest ~/vault
 
 # Local (LM Studio)
-npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b
+npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
+  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF
 
 # Debug logging
 DEBUG=1 npx @jshph/digest
 ```
 
 Any OpenAI-compatible endpoint works — OpenRouter, LM Studio, Ollama, vLLM, etc. Set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` as environment variables, or pass `--model` and `--base-url` on the command line. The vault path defaults to the current directory.
+
+### Enzyme model
+
+Enzyme uses an LLM to generate catalyst questions during `enzyme init` and `enzyme refresh`. By default it uses your main model, but you can point it at a smaller/cheaper model with `--enzyme-model`:
+
+```bash
+# Use a small local model for enzyme catalysts (fast, free)
+npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
+  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF
+
+# Or a different endpoint entirely
+npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
+  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF --enzyme-base-url http://localhost:5678/v1
+```
+
+For local setups with LM Studio, `lmstudio-community/Qwen3-0.6B-GGUF` works well for catalyst generation — it's fast enough that `enzyme init` completes in seconds rather than minutes.
 
 ## Read the code
 

@@ -36,8 +36,8 @@ Options:
   --model <name>             Model name (overrides OPENAI_MODEL)
   --base-url <url>           API base URL (overrides OPENAI_BASE_URL)
   --max-context <tokens>     Max context window size (default: 32768)
-  --router-model <name>      Smaller model for enzyme catalyst generation (optional)
-  --router-base-url <url>    Base URL for router model (optional)
+  --enzyme-model <name>      Smaller model for enzyme catalyst generation (optional)
+  --enzyme-base-url <url>    Base URL for enzyme model (optional)
   --guide <text>             Guide prompt for enzyme init (optional)
   --help                     Show this help message
 
@@ -52,14 +52,14 @@ Examples:
   # Set up once, then just run digest in your vault
   export OPENAI_API_KEY=sk-or-...
   export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-  export OPENAI_MODEL=qwen/qwen3-32b
+  export OPENAI_MODEL=zai-org/glm-4.7-flash
   cd ~/vault && npx @jshph/digest
 
   # Or specify a vault path
   npx @jshph/digest ~/vault
 
   # Local (LM Studio)
-  npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b
+  npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF
 `.trim()
 
 function parseArgs(argv: string[]) {
@@ -74,8 +74,8 @@ function parseArgs(argv: string[]) {
   let model = process.env.OPENAI_MODEL || ''
   let baseURL = process.env.OPENAI_BASE_URL || ''
   let maxContext = DEFAULT_MAX_CONTEXT
-  let routerModel = ''
-  let routerBaseURL = ''
+  let enzymeModel = ''
+  let enzymeBaseURL = ''
   let guide = ''
 
   for (let i = 0; i < args.length; i++) {
@@ -86,10 +86,10 @@ function parseArgs(argv: string[]) {
         baseURL = args[++i]; break
       case '--max-context':
         maxContext = parseInt(args[++i], 10); break
-      case '--router-model':
-        routerModel = args[++i]; break
-      case '--router-base-url':
-        routerBaseURL = args[++i]; break
+      case '--enzyme-model':
+        enzymeModel = args[++i]; break
+      case '--enzyme-base-url':
+        enzymeBaseURL = args[++i]; break
       case '--guide':
         guide = args[++i]; break
       default:
@@ -130,11 +130,11 @@ function parseArgs(argv: string[]) {
   // Default base URL
   if (!baseURL) baseURL = 'https://openrouter.ai/api/v1'
 
-  return { vaultPath: resolve(vaultPath), model, baseURL, maxContext, routerModel, routerBaseURL, guide }
+  return { vaultPath: resolve(vaultPath), model, baseURL, maxContext, enzymeModel, enzymeBaseURL, guide }
 }
 
 async function main() {
-  const { vaultPath, model, baseURL, maxContext, routerModel, routerBaseURL, guide } = parseArgs(process.argv)
+  const { vaultPath, model, baseURL, maxContext, enzymeModel, enzymeBaseURL, guide } = parseArgs(process.argv)
 
   const isTTYBanner = process.stderr.isTTY
   const dim = (s: string) => isTTYBanner ? `\x1b[2m${s}\x1b[0m` : s
@@ -210,14 +210,14 @@ async function main() {
 
   // Build enzyme env: reuse Digest's LLM config for catalyst generation.
   // Enzyme reads OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL (OpenAI-compat).
-  // Prefer router model (cheaper) for catalysts, fall back to main model.
+  // Prefer enzyme model (cheaper/smaller) for catalysts, fall back to main model.
   const enzymeEnv: Record<string, string> = { ...process.env as Record<string, string> }
-  const enzymeModel = routerModel || model
-  const enzymeBaseURL = routerModel
-    ? (routerBaseURL || baseURL)
+  const resolvedEnzymeModel = enzymeModel || model
+  const resolvedEnzymeBaseURL = enzymeModel
+    ? (enzymeBaseURL || baseURL)
     : baseURL
-  if (enzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = enzymeBaseURL
-  if (enzymeModel) enzymeEnv.OPENAI_MODEL = enzymeModel
+  if (resolvedEnzymeBaseURL) enzymeEnv.OPENAI_BASE_URL = resolvedEnzymeBaseURL
+  if (resolvedEnzymeModel) enzymeEnv.OPENAI_MODEL = resolvedEnzymeModel
 
   if (enzymeAvailable && !existsSync(enzymeDb)) {
     // Vault not initialized — run enzyme init
