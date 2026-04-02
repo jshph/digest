@@ -15,7 +15,7 @@
 ```bash
 export OPENAI_API_KEY=sk-or-...
 export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_MODEL=zai-org/glm-4.7-flash
+export OPENAI_MODEL=google/gemini-3-flash-preview
 cd ~/your-vault && npx @jshph/digest
 ```
 
@@ -109,7 +109,7 @@ VaultSearch is the primary retrieval tool — expensive (returns 5-15K tokens of
 # Set up once in your shell profile
 export OPENAI_API_KEY=sk-or-...
 export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_MODEL=zai-org/glm-4.7-flash
+export OPENAI_MODEL=google/gemini-3-flash-preview
 
 # Then just run in your vault
 cd ~/vault && npx @jshph/digest
