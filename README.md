@@ -21,7 +21,7 @@ cd ~/your-vault && npx @jshph/digest
 
 General-purpose agents burn 60-90K tokens exploring a knowledge base — grep, read, decide, repeat. Digest replaces that explore loop with [Enzyme](https://www.enzyme.garden/)'s pre-computed semantic index: an 8ms vector lookup against catalyst questions your vault has already generated. The model gets relevant context before it starts thinking.
 
-~2,700 lines of TypeScript. Works with any OpenAI-compatible endpoint. Works with Obsidian vaults.
+~2,400 lines of TypeScript. Works with any OpenAI-compatible endpoint. Works with Obsidian vaults.
 
 ## Why explore-then-respond is expensive
 
