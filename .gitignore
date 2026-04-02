@@ -4,3 +4,4 @@ docs/
 debug.jsonl
 .scribe/
 .enzyme/
+__pycache__/

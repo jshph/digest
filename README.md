@@ -2,7 +2,7 @@
 
 # ⚡ Digest
 
-**A 3,000-line agent that talks to your Obsidian vault.**<br>
+**A 2,400-line agent that talks to your Obsidian vault.**<br>
 **Runs on local 9B models. 8ms semantic lookup via [Enzyme](https://www.enzyme.garden/).**
 
 [![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
@@ -143,7 +143,7 @@ The codebase is designed to be read top-to-bottom as a reference for building mi
 
 Claude Code's SDK spawns a subprocess, pipes JSONL over stdio, and gives you the full Claude Code agent — permissions, hooks, MCP tools, session persistence. It's powerful, but it's also 70K+ LOC, Anthropic-only, and inherits the explore-mode token economics: the agent decides to search, reads results, decides to search again, and burns 60-90K tokens per response.
 
-Digest is a ~3,000 LOC in-process agent loop. You call `agent.prompt()` directly. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking.
+Digest is a ~2,400 LOC in-process agent loop. You call `agent.prompt()` directly. But the architecture is fundamentally different — Enzyme's pre-computed index means the agent already has context before it starts thinking.
 
 | | Claude Code SDK | Digest |
 |---|---|---|
@@ -151,7 +151,7 @@ Digest is a ~3,000 LOC in-process agent loop. You call `agent.prompt()` directly
 | LLM round trips | 5-10 | 1-2 |
 | Runtime | Subprocess (spawns CLI, stdio JSONL) | In-process (`agent.prompt()`) |
 | Providers | Anthropic only | Any OpenAI-compatible endpoint |
-| Size | ~70K LOC | ~3,000 LOC |
+| Size | ~70K LOC | ~2,400 LOC |
 
 The tradeoff: you lose sessions, permissions, subagents, and the full built-in tool suite (Bash, Glob, Grep, etc.). You gain provider freedom, explicit context control, and 10x fewer tokens per response.
 

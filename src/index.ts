@@ -19,16 +19,11 @@ export type {
 } from './core/types.js'
 
 // Provider
-export { createAnthropicProvider } from './core/providers/anthropic.js'
-export type { AnthropicProviderConfig } from './core/providers/anthropic.js'
-export { resolveApiKey } from './core/auth.js'
+export { createOpenAIProvider } from './core/providers/openai.js'
+export type { OpenAIProviderConfig } from './core/providers/openai.js'
 
 // Tools
-export { tool } from './tools/tool.js'
-export type { ToolParams } from './tools/tool.js'
-export { createReadTool } from './tools/read.js'
-export { createWriteTool } from './tools/write.js'
-export { createTextSearchTool } from './tools/text-search.js'
+export { createVaultSearchTool } from './tools/vault-search.js'
 export { createReadFileTool } from './tools/read-file.js'
 export { createWriteFileTool } from './tools/write-file.js'
 
