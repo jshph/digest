@@ -2,13 +2,11 @@
 
 # ⚡ Digest
 
-**The agent harness that doesn't explore — it already knows.**
+**A 2,700-line agent that talks to your Obsidian vault.**<br>
+**Runs on local 9B models. 8ms semantic lookup via [Enzyme](https://www.enzyme.garden/).**
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-2,700_LOC-3178C6?logo=typescript&logoColor=white)](https://github.com/jshph/digest)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
-
-`8ms vault lookup` · `1-2 LLM turns` · `5-20K tokens per response` · `runs on 9B+ local models`
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 </div>
 
