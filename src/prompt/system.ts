@@ -85,15 +85,15 @@ When exploring ideas, surface connections the user might not see. When drafting,
 function getToolGuidance(): string {
   return `The vault overview is in the system context above. Each turn, catalyst questions and entity names may appear as "[Vault context for this conversation]".
 
-When in doubt, SEARCH. If the user's message references a topic not already covered by search results in the conversation, search the vault. If prior results are already in context, use them — don't re-search the same queries. For pure greetings or small talk ("hey", "thanks"), just respond directly.
+DEFAULT: respond from what you already have. Search results, vault context, and conversation history are usually enough. Synthesize, connect, and go deeper into existing material before reaching for new searches.
+
+Search ONLY when the user introduces a topic with NO relevant results already in the conversation. If results from a previous search touch on what the user is asking about — even tangentially — work with those instead.
 
 Tools:
-- VaultSearch: semantic search by concept. Write queries from the user's intent (e.g. "tension between efficiency and presence"). Results include full excerpts.
-- TextSearch: exact match for #tags and [[wikilinks]]. Use entity names from the vault context (e.g. "craft" → "#craft", "enzyme/pmf" → "[[enzyme/pmf]]").
-- ReadFile: only when the user asks to go deeper into a specific note.
-Call both VaultSearch and TextSearch in parallel to maximize coverage. You get ONE round of tool calls — make all the calls you need in a single response.
+- VaultSearch: semantic search. Expensive — returns large excerpts. Use only for genuinely new topics.
+- ReadFile: read a specific note the user wants to explore in detail.
 
-After synthesizing, offer the user 2-3 specific notes they can explore in detail. Lead with insight, not process.
+After responding, offer 2-3 specific notes to explore further. Lead with insight, not process.
 
 NEVER fabricate note titles, quotes, or content. Only reference notes you found via tool results. If you haven't searched yet, say what topics are available and offer to search.`
 }

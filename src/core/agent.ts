@@ -141,7 +141,7 @@ export class Agent {
   private async runLoop(): Promise<void> {
     this.abortController = new AbortController()
     const { signal } = this.abortController
-    const maxToolRounds = 3
+    const maxToolRounds = 1
     let toolRound = 0
 
     await this.manageContext()
@@ -149,14 +149,23 @@ export class Agent {
     while (!signal.aborted) {
       const hasToolResults = toolRound > 0
 
-      // After tool execution, inject ephemeral synthesis directive.
-      // This nudges the model to synthesize but doesn't prevent
-      // additional tool calls if it genuinely needs more context.
+      // After tool execution, inject ephemeral synthesis directive
+      // that lists what was already searched so the model can see
+      // "I already have X, Y, Z" and avoid redundant searches.
       let injectedDirective = false
       if (hasToolResults) {
+        const priorSearches = this.messages
+          .filter((m): m is AssistantMessage => m.role === 'assistant')
+          .flatMap(m => m.content)
+          .filter((b): b is ToolCallContent => b.type === 'tool_call' && b.name === 'VaultSearch')
+          .map(b => (b.arguments.query as string) || '')
+          .filter(Boolean)
+        const searchList = priorSearches.length > 0
+          ? `\nAlready searched: ${priorSearches.map(q => `"${q}"`).join(', ')}.`
+          : ''
         this.messages.push({
           role: 'user',
-          content: 'Respond to the user based on the results above. Synthesize key insights and quote relevant passages. Only search again if you need information on a genuinely different topic not covered above.',
+          content: `Respond using the search results already in the conversation. Quote key passages and connect ideas.${searchList}\nDo NOT call VaultSearch unless the user is asking about a topic with NO relevant results above.`,
           timestamp: Date.now(),
         } satisfies UserMessage)
         injectedDirective = true
