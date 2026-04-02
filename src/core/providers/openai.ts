@@ -57,7 +57,7 @@ async function* streamOpenAI(
   let systemContent = systemBlocks.map(b => b.text).join('\n\n')
 
   // When no tools are provided (synthesis turn), suppress models that
-  // hallucinate tool-call XML (e.g. Qwen's <tool_call> format).
+  // hallucinate tool-call XML in their text output.
   if (tools.length === 0) {
     systemContent += '\n\nDo not emit tool calls, tool-call XML, or tool names. Respond in natural language only.'
   }

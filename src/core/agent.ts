@@ -137,7 +137,7 @@ export class Agent {
     // call because Qwen emits <tool_call> XML as text content alongside
     // structured tool calls. We'll re-emit text if no tools are called.
     await this.emit({ type: 'turn_start' })
-    const response = await this.callModel(signal, true)
+    const response = await this.callModel(signal, { tools: true, streamText: false })
 
     if (!response || signal.aborted) {
       this.abortController = null
@@ -183,10 +183,13 @@ export class Agent {
     }
     await this.emit({ type: 'turn_end', usage: response.usage })
 
-    // Step 2: Synthesis — call without tools, text streams to user.
+    // Step 2: Synthesis — call WITHOUT tools so model is forced to
+    // respond in text. This breaks KV cache prefix (tools change the
+    // Jinja template), costing ~7s of system prompt reprocessing.
+    // But 9B models won't reliably synthesize when tools are available.
     if (!signal.aborted) {
       await this.emit({ type: 'turn_start' })
-      const synthesis = await this.callModel(signal, false)
+      const synthesis = await this.callModel(signal, { tools: false, streamText: true })
       if (synthesis) {
         this.messages.push(synthesis)
         await this.emit({ type: 'turn_end', usage: synthesis.usage })
@@ -245,9 +248,9 @@ export class Agent {
 
   private lastSerializedPrefix: string | null = null
 
-  private async callModel(signal: AbortSignal, withTools: boolean): Promise<AssistantMessage | null> {
+  private async callModel(signal: AbortSignal, opts: { tools: boolean; streamText: boolean }): Promise<AssistantMessage | null> {
     const llmMessages = this.toLLMMessages()
-    const toolDefs = withTools
+    const toolDefs = opts.tools
       ? this.config.tools.map(t => t.definition)
       : []
 
@@ -263,10 +266,7 @@ export class Agent {
       signal,
     )
 
-    // Suppress text on tool-calling turns (withTools=true).
-    // Qwen emits <tool_call> XML as text — we don't want that streamed.
-    // If no tools are called, the agent re-emits text from the response.
-    const suppressText = withTools
+    const suppressText = !opts.streamText
 
     for await (const event of stream) {
       if (signal.aborted) return null
