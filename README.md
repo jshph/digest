@@ -3,7 +3,7 @@
 # ⚡ Digest
 
 **A 2,400-line agent that talks to your Obsidian vault.**<br>
-**Runs on local 9B models. 8ms semantic lookup via [Enzyme](https://www.enzyme.garden/).**
+**Runs on local models. 8ms semantic lookup via [Enzyme](https://www.enzyme.garden/).**
 
 [![npm](https://img.shields.io/npm/v/@jshph/digest?color=cb3837&logo=npm)](https://www.npmjs.com/package/@jshph/digest)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -90,7 +90,7 @@ The model defaults to **synthesizing from existing context** — prior search re
 
 For implementation details, see:
 - **[docs/architecture.md](docs/architecture.md)** — agent loop, caching, synthesis directives, token budget
-- **[docs/qwen-llama-cpp.md](docs/qwen-llama-cpp.md)** — Qwen Jinja template gotchas, XML handling, 9B model limitations
+- **[docs/qwen-llama-cpp.md](docs/qwen-llama-cpp.md)** — llama.cpp gotchas, Qwen Jinja template quirks, XML handling
 - **[docs/modal-gpu-testing.md](docs/modal-gpu-testing.md)** — GPU test harness for faster iteration
 
 ## Tools
@@ -117,31 +117,34 @@ cd ~/vault && npx @jshph/digest
 # Or pass a path
 npx @jshph/digest ~/vault
 
-# Local (LM Studio)
-npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
-  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF
+# Local (llama-server)
+llama-server -hf ggml-org/gemma-4-E4B-it-GGUF
+export OPENAI_BASE_URL=http://127.0.0.1:8080
+npx @jshph/digest
 
 # Debug logging
 DEBUG=1 npx @jshph/digest
 ```
 
-Any OpenAI-compatible endpoint works — OpenRouter, LM Studio, Ollama, vLLM, etc. Set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` as environment variables, or pass `--model` and `--base-url` on the command line. The vault path defaults to the current directory.
+Any OpenAI-compatible endpoint works — OpenRouter, llama-server, Ollama, vLLM, etc. Set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL` as environment variables, or pass `--model` and `--base-url` on the command line. The vault path defaults to the current directory.
+
+### Local with llama-server
+
+The easiest local setup is [llama.cpp](https://github.com/ggerganov/llama.cpp)'s built-in server with a Hugging Face model:
+
+```bash
+llama-server -hf ggml-org/gemma-4-E4B-it-GGUF
+export OPENAI_BASE_URL=http://127.0.0.1:8080
+cd ~/vault && npx @jshph/digest
+```
 
 ### Enzyme model
 
 Enzyme uses an LLM to generate catalyst questions during `enzyme init` and `enzyme refresh`. By default it uses your main model, but you can point it at a smaller/cheaper model with `--enzyme-model`:
 
 ```bash
-# Use a small local model for enzyme catalysts (fast, free)
-npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
-  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF
-
-# Or a different endpoint entirely
-npx @jshph/digest --base-url http://localhost:1234/v1 --model qwen/qwen3.5-9b \
-  --enzyme-model lmstudio-community/Qwen3-0.6B-GGUF --enzyme-base-url http://localhost:5678/v1
+npx @jshph/digest --enzyme-model smaller-model-name
 ```
-
-For local setups with LM Studio, `lmstudio-community/Qwen3-0.6B-GGUF` works well for catalyst generation — it's fast enough that `enzyme init` completes in seconds rather than minutes.
 
 ## Read the code
 
@@ -187,7 +190,7 @@ modal serve modal_llama.py
 
 # Multi-turn test against Modal
 printf 'hey\nexplore craft vs AI\nsay more about that\n' | \
-  OPENAI_BASE_URL=<modal-url> OPENAI_MODEL=qwen/qwen3.5-9b npx @jshph/digest
+  OPENAI_BASE_URL=<modal-url> npx @jshph/digest
 ```
 
 Uses the pre-built `ghcr.io/ggml-org/llama.cpp:server-cuda` image — native C++ llama-server with CUDA, zero compilation. Model is baked into the image (~2 min first build, then cached).
